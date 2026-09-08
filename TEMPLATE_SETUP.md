@@ -51,7 +51,15 @@ after changing `.env` run `docker compose build frontend`.
 
 ## 4. Database
 
-- Point `DATABASE_URL` at an empty PostgreSQL 16 database.
+- Point `DATABASE_URL` at an empty PostgreSQL 16 database. No Postgres
+  available? Uncomment the `db` service at the top of `docker-compose.yml`
+  (instructions are in the block), set `POSTGRES_PASSWORD` in `.env` and use
+  `postgresql://postgres:<password>@db:5432/pmtool?...` as `DATABASE_URL`.
+  Postgres on the same host but outside Docker: use the server's LAN IP, not
+  `localhost` (inside a container that is the container itself).
+- Do not put Docker proxy settings in `~/.docker/config.json` — they are
+  injected into every container, break the BusyBox `wget` healthchecks and
+  route SMTP through the proxy. The root `.env` build args are enough.
 - Schema is applied with `prisma migrate deploy` (the backend image runs it
   on start — see `docs/migrations.md`). Never edit old migrations; add new
   ones with `npm run db:migrate:dev` in `backend/`.
