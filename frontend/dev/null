@@ -1,0 +1,98 @@
+// src/lib/statuses.js
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { PROJECT_STATUSES, PROJECT_STATUS_MAP } from "@/lib/constants";
+var COLOR_TO_BADGE = {
+  slate: "outline",
+  sky: "secondary",
+  emerald: "success",
+  amber: "warning",
+  rose: "destructive",
+  violet: "default"
+};
+function colorToBadge(color) {
+  return COLOR_TO_BADGE[color] || "secondary";
+}
+var cache = { PROJECT: null };
+var inflight = { PROJECT: null };
+var subscribers = /* @__PURE__ */ new Set();
+function notify() {
+  subscribers.forEach((cb) => {
+    try {
+      cb();
+    } catch {
+    }
+  });
+}
+async function fetchScope(scope) {
+  if (cache[scope]) return cache[scope];
+  if (inflight[scope]) return inflight[scope];
+  const promise = (async () => {
+    try {
+      const res = await api.get(`/templates/statuses?scope=${scope}`);
+      const list = (res.data?.statuses || []).filter((s) => s.isActive).sort((a, b) => a.order - b.order).map((s) => ({
+        value: s.key,
+        label: s.label,
+        color: s.color,
+        badge: colorToBadge(s.color)
+      }));
+      cache[scope] = list;
+      notify();
+      return list;
+    } finally {
+      inflight[scope] = null;
+    }
+  })();
+  inflight[scope] = promise;
+  return promise;
+}
+function invalidateStatuses() {
+  cache = { PROJECT: null };
+  inflight = { PROJECT: null };
+  notify();
+}
+function fallbackForScope(scope) {
+  return scope === "PROJECT" ? PROJECT_STATUSES : [];
+}
+function fallbackMapForScope(scope) {
+  return scope === "PROJECT" ? PROJECT_STATUS_MAP : {};
+}
+function useStatuses(scope) {
+  const [list, setList] = useState(
+    () => cache[scope] || fallbackForScope(scope)
+  );
+  useEffect(() => {
+    let cancelled = false;
+    const onChange = () => {
+      if (cancelled) return;
+      setList(cache[scope] || fallbackForScope(scope));
+    };
+    subscribers.add(onChange);
+    if (!cache[scope]) {
+      fetchScope(scope).then(onChange).catch(onChange);
+    } else {
+      onChange();
+    }
+    return () => {
+      cancelled = true;
+      subscribers.delete(onChange);
+    };
+  }, [scope]);
+  const find = (key) => {
+    if (!key) return null;
+    const direct = list.find((s) => s.value === key);
+    if (direct) return direct;
+    const fallback = fallbackMapForScope(scope)[key];
+    if (fallback) return fallback;
+    return { value: key, label: key, color: "slate", badge: "secondary" };
+  };
+  return { list, find };
+}
+function useProjectStatuses() {
+  return useStatuses("PROJECT");
+}
+export {
+  invalidateStatuses,
+  useProjectStatuses,
+  useStatuses
+};

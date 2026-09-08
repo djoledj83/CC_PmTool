@@ -1,0 +1,24 @@
+# Environment / secrets — only the *.example files are versioned
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Dependencies & builds
+node_modules/
+frontend/dist/
+backend/logs/
+backend/uploads/
+
+# Backups produced by scripts/backup.sh
+backups/
+
+# Local tooling
+.claude/settings.local.json
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,159 @@
+%% Ticketing module — ER schema (single diagram, Mermaid-compatible)
+%% Open in: https://mermaid.live
+%% SVG: npx @mermaid-js/mermaid-cli -i docs/ticketing-module-schema.mmd -o docs/ticketing-module-schema.svg
+
+erDiagram
+    User ||--o{ TicketMailbox : createdBy
+    User ||--o{ Ticket : assignee
+    User ||--o{ Ticket : closedBy
+    User ||--o{ TicketMessage : author
+    User ||--o{ TicketParticipant : participant
+    User ||--o{ TicketParticipant : addedBy
+
+    Team ||--o{ TicketMailbox : defaultTeam
+    Team ||--o{ Ticket : queue
+
+    Client ||--o{ Ticket : crmLink
+
+    Project ||--o{ Ticket : escalation
+    Task |o--o| Ticket : promotedTask
+
+    TicketMailbox ||--o{ Ticket : receives
+    TicketMailbox ||--o{ TicketIngestLog : syncs
+
+    Ticket ||--o{ TicketMessage : thread
+    Ticket ||--o{ TicketParticipant : watchers
+    Ticket ||--o{ TicketTagOnTicket : tagged
+    Ticket ||--o{ TicketIngestLog : fromIngest
+    Ticket ||--o{ ActivityEvent : audit
+
+    TicketMessage ||--o{ TicketMessageAttachment : files
+    TicketMessage |o--o| TicketIngestLog : processedAs
+
+    TicketTag ||--o{ TicketTagOnTicket : usedOn
+
+    TicketMailbox {
+        string id PK
+        string name
+        string emailAddress UK
+        string teamId FK
+        string protocol
+        boolean enabled
+        string imapHost
+        int imapPort
+        string syncCursor
+        datetime lastSyncAt
+        string createdById FK
+    }
+
+    Ticket {
+        string id PK
+        int number UK
+        string mailboxId FK
+        string status
+        string priority
+        string subject
+        string requesterEmail
+        string requesterName
+        string clientId FK
+        string assigneeId FK
+        datetime assignedAt
+        string projectId FK
+        string taskId FK
+        string teamId FK
+        string rootMessageId
+        string publicToken UK
+        datetime firstResponseAt
+        datetime closedAt
+        string closedById FK
+    }
+
+    TicketMessage {
+        string id PK
+        string ticketId FK
+        string direction
+        boolean isInternal
+        string fromEmail
+        string toEmails
+        string bodyText
+        string bodyHtml
+        string messageId UK
+        string inReplyTo
+        string refHeaders
+        string authorId FK
+        datetime sentAt
+    }
+
+    TicketMessageAttachment {
+        string id PK
+        string messageId FK
+        string fileName
+        string mimeType
+        int sizeBytes
+        string storagePath
+    }
+
+    TicketParticipant {
+        string id PK
+        string ticketId FK
+        string userId FK
+        string addedById FK
+    }
+
+    TicketTag {
+        string id PK
+        string name UK
+        string color
+    }
+
+    TicketTagOnTicket {
+        string ticketId PK
+        string tagId PK
+    }
+
+    TicketIngestLog {
+        string id PK
+        string mailboxId FK
+        string ingestStatus
+        string externalUid
+        string messageId
+        string ticketId FK
+        string ticketMessageId FK
+        string fromEmail
+        string subject
+        datetime receivedAt
+        string rawHeaders
+    }
+
+    User {
+        string id PK
+        string email UK
+        string name
+    }
+
+    Team {
+        string id PK
+        string name
+    }
+
+    Client {
+        string id PK
+        string name
+        string email
+    }
+
+    Project {
+        string id PK
+        string name
+    }
+
+    Task {
+        string id PK
+        string title
+    }
+
+    ActivityEvent {
+        string id PK
+        string ticketId FK
+        string eventType
+    }

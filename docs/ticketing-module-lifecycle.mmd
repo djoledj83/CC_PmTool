@@ -1,0 +1,12 @@
+%% Ticketing — status lifecycle
+
+stateDiagram-v2
+    [*] --> NEW
+    NEW --> OPEN
+    OPEN --> PENDING
+    PENDING --> OPEN
+    OPEN --> RESOLVED
+    RESOLVED --> CLOSED
+    CLOSED --> OPEN
+    NEW --> CLOSED
+    RESOLVED --> PENDING

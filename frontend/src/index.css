@@ -1,0 +1,327 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        --background: 0 0% 100%;
+        --foreground: 222.2 84% 4.9%;
+        --card: 0 0% 100%;
+        --card-foreground: 222.2 84% 4.9%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 222.2 84% 4.9%;
+        /* Brand purple #5353a4 (was blue). White foreground keeps AA contrast. */
+        --primary: 240 33% 48%;
+        --primary-foreground: 210 40% 98%;
+        --secondary: 210 40% 96.1%;
+        --secondary-foreground: 222.2 47.4% 11.2%;
+        --muted: 210 40% 96.1%;
+        --muted-foreground: 215.4 16.3% 46.9%;
+        --accent: 210 40% 96.1%;
+        --accent-foreground: 222.2 47.4% 11.2%;
+        --destructive: 0 84.2% 60.2%;
+        --destructive-foreground: 210 40% 98%;
+        --border: 214.3 31.8% 91.4%;
+        --input: 214.3 31.8% 91.4%;
+        --ring: 240 33% 48%;
+        --radius: 0.5rem;
+    }
+
+    .dark {
+        --background: 222.2 84% 4.9%;
+        --foreground: 210 40% 98%;
+        --card: 222.2 84% 4.9%;
+        --card-foreground: 210 40% 98%;
+        --popover: 222.2 84% 4.9%;
+        --popover-foreground: 210 40% 98%;
+        /* Lighter tint of the brand purple so it pops on the dark surface. */
+        --primary: 240 45% 66%;
+        --primary-foreground: 222.2 47.4% 11.2%;
+        --secondary: 217.2 32.6% 17.5%;
+        --secondary-foreground: 210 40% 98%;
+        --muted: 217.2 32.6% 17.5%;
+        --muted-foreground: 215 20.2% 65.1%;
+        --accent: 217.2 32.6% 17.5%;
+        --accent-foreground: 210 40% 98%;
+        --destructive: 0 62.8% 30.6%;
+        --destructive-foreground: 210 40% 98%;
+        /* Lifted well above the card/muted lightness so borders are
+           actually visible against dark surfaces. */
+        --border: 217.2 20% 30%;
+        --input: 217.2 20% 30%;
+        --ring: 240 45% 58%;
+    }
+
+    /* "Dim" — a softer, greyer dark theme for people who find the
+       near-black `.dark` too harsh. Applied as `<html class="dark dim">`
+       so every existing `dark:` utility keeps working; this block only
+       overrides the surface / neutral variables to a neutral slate grey
+       (background lifted from ~5% to ~16% lightness, lower saturation).
+       Accent colours (primary, ring, destructive) are inherited from
+       `.dark` above — they read fine on grey. Must stay AFTER `.dark`
+       so these overrides win the cascade. */
+    .dim {
+        --background: 220 13% 19%;
+        --foreground: 210 20% 93%;
+        --card: 220 13% 22%;
+        --card-foreground: 210 20% 93%;
+        --popover: 220 13% 22%;
+        --popover-foreground: 210 20% 93%;
+        --secondary: 220 11% 28%;
+        --secondary-foreground: 210 20% 93%;
+        --muted: 220 11% 27%;
+        --muted-foreground: 215 14% 72%;
+        --accent: 220 11% 31%;
+        --accent-foreground: 210 20% 93%;
+        --border: 220 10% 38%;
+        --input: 220 10% 38%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    /* Native date/time picker calendar icon is near-black by default,
+       which disappears on the dark background. Invert it in dark mode
+       so the "pick date" affordance stays visible. */
+    .dark input[type='date']::-webkit-calendar-picker-indicator,
+    .dark input[type='time']::-webkit-calendar-picker-indicator,
+    .dark input[type='datetime-local']::-webkit-calendar-picker-indicator,
+    .dark input[type='month']::-webkit-calendar-picker-indicator {
+        filter: invert(1) brightness(1.6);
+        opacity: 0.75;
+        cursor: pointer;
+    }
+    body {
+        @apply bg-background text-foreground;
+        font-family:
+            ui-sans-serif,
+            system-ui,
+            -apple-system,
+            BlinkMacSystemFont,
+            'Segoe UI',
+            Roboto,
+            sans-serif;
+    }
+
+    /* Scrollbars — themed off the CSS variables so they read correctly
+       in light, `.dark` and `.dim`. The browser default is an opaque
+       light-grey bar that looks broken on the near-black dark surface
+       (see the sidebar). Firefox uses scrollbar-width/‑color; Chromium
+       & WebKit use the ::-webkit-scrollbar pseudo-elements. Both draw a
+       thin, semi-transparent thumb over a transparent track. */
+    * {
+        scrollbar-width: thin;
+        scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+    }
+    ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+    }
+    ::-webkit-scrollbar-track,
+    ::-webkit-scrollbar-corner {
+        background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+        background-color: hsl(var(--muted-foreground) / 0.35);
+        border-radius: 9999px;
+        /* Transparent border + content-box clip = padding around the
+           thumb so it looks slim and floats off the track edges. */
+        border: 2px solid transparent;
+        background-clip: content-box;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background-color: hsl(var(--muted-foreground) / 0.55);
+    }
+}
+
+/* "You arrived here from a notification or to-do" highlight.
+   Shared by every deep-link effect (PhasesPlan tasks/activities,
+   NotesPanel notes, Users page rows). The visual treatment combines
+   THREE inner cues so it stays visible even when the row sits inside
+   an overflow-hidden parent (the project plan card clips outer
+   shadows). All effects render INSIDE the row's own bounds:
+     1. A bold filled background tint
+     2. A coloured inset box-shadow acting as a thick inner border
+     3. A short keyframe pulse for the first ~700ms to grab the eye
+   After the initial pulse the row keeps the calmer "settled" state
+   for the rest of the highlight window, then fades out cleanly. */
+
+@keyframes pm-deep-link-pulse {
+    0% {
+        background-color: hsl(var(--primary) / 0.35);
+        box-shadow:
+            inset 0 0 0 4px hsl(var(--primary) / 0.85),
+            inset 0 0 18px 6px hsl(var(--primary) / 0.35);
+    }
+    50% {
+        background-color: hsl(var(--primary) / 0.22);
+        box-shadow:
+            inset 0 0 0 3px hsl(var(--primary) / 0.7),
+            inset 0 0 14px 4px hsl(var(--primary) / 0.25);
+    }
+    100% {
+        background-color: hsl(var(--primary) / 0.12);
+        box-shadow:
+            inset 0 0 0 2px hsl(var(--primary) / 0.55),
+            inset 0 0 10px 2px hsl(var(--primary) / 0.18);
+    }
+}
+
+.pm-deep-link-highlight {
+    position: relative;
+    z-index: 5;
+    border-radius: 0.5rem;
+    /* Hold the "100%" frame after the keyframe finishes so the
+       highlight lingers until the JS-side fade-out class is added. */
+    animation: pm-deep-link-pulse 700ms ease-out forwards;
+    transition:
+        box-shadow 900ms ease-out,
+        background-color 900ms ease-out;
+}
+
+/* Fade-out class — added just before removing the highlight so the
+   tint and inner border melt away instead of disappearing instantly. */
+.pm-deep-link-highlight-fadeout {
+    animation: none;
+    background-color: transparent;
+    box-shadow:
+        inset 0 0 0 0 hsl(var(--primary) / 0),
+        inset 0 0 0 0 hsl(var(--primary) / 0);
+}
+
+/* `task-pulse` — applied to a task row whenever the user clicks a
+   task notification from the bell. Pulses FOUR times over ~4.5s
+   with a thick, vivid primary-coloured ring + bold background
+   tint so the target row is impossible to miss even inside a
+   dense, long plan. The animation is driven from TaskRow's
+   `pulsing` state in PhasesPlan.jsx, which re-mounts the class
+   on every notification click (even when navigating to the same
+   task twice). The wrapper that carries this class sets
+   `scroll-mt-24` so the row lands clear of the sticky header
+   after scrollIntoView.
+
+   We use TWO shadow layers: an inner solid primary ring + an
+   outer translucent glow that "breathes" in and out. The row
+   stays the same physical size — earlier versions added a gentle
+   1.0 → 1.015 scale swell on every beat, but multiple users found
+   the resizing distracting (and it nudged surrounding rows when
+   the pulsing row was inside a tight flex container), so the
+   scale transform has been dropped. The colour / ring pulse on
+   its own is already plenty loud. */
+@keyframes taskPulse {
+    0% {
+        background-color: hsl(var(--primary) / 0);
+        box-shadow:
+            0 0 0 0 hsl(var(--primary) / 0),
+            0 0 0 0 hsl(var(--primary) / 0);
+    }
+    5% {
+        background-color: hsl(var(--primary) / 0.45);
+        box-shadow:
+            0 0 0 5px hsl(var(--primary) / 1),
+            0 0 0 14px hsl(var(--primary) / 0.55);
+    }
+    18% {
+        background-color: hsl(var(--primary) / 0.2);
+        box-shadow:
+            0 0 0 3px hsl(var(--primary) / 0.7),
+            0 0 0 10px hsl(var(--primary) / 0.1);
+    }
+    28% {
+        background-color: hsl(var(--primary) / 0.45);
+        box-shadow:
+            0 0 0 5px hsl(var(--primary) / 1),
+            0 0 0 14px hsl(var(--primary) / 0.55);
+    }
+    42% {
+        background-color: hsl(var(--primary) / 0.2);
+        box-shadow:
+            0 0 0 3px hsl(var(--primary) / 0.7),
+            0 0 0 10px hsl(var(--primary) / 0.1);
+    }
+    55% {
+        background-color: hsl(var(--primary) / 0.45);
+        box-shadow:
+            0 0 0 5px hsl(var(--primary) / 1),
+            0 0 0 14px hsl(var(--primary) / 0.55);
+    }
+    70% {
+        background-color: hsl(var(--primary) / 0.18);
+        box-shadow:
+            0 0 0 3px hsl(var(--primary) / 0.65),
+            0 0 0 10px hsl(var(--primary) / 0.08);
+    }
+    82% {
+        background-color: hsl(var(--primary) / 0.4);
+        box-shadow:
+            0 0 0 4px hsl(var(--primary) / 0.95),
+            0 0 0 12px hsl(var(--primary) / 0.45);
+    }
+    100% {
+        background-color: hsl(var(--primary) / 0);
+        box-shadow:
+            0 0 0 0 hsl(var(--primary) / 0),
+            0 0 0 0 hsl(var(--primary) / 0);
+    }
+}
+
+/* A single brief blink (~1s): a quick rise to a vivid ring + tint, then
+   a clean fade. Long enough to spot the row you landed on, short enough
+   not to nag. (Supersedes the older multi-beat `taskPulse` keyframe
+   above, which is no longer referenced.) */
+@keyframes taskPulseOnce {
+    0% {
+        background-color: hsl(var(--primary) / 0);
+        box-shadow:
+            0 0 0 0 hsl(var(--primary) / 0),
+            0 0 0 0 hsl(var(--primary) / 0);
+    }
+    30% {
+        background-color: hsl(var(--primary) / 0.45);
+        box-shadow:
+            0 0 0 5px hsl(var(--primary) / 0.95),
+            0 0 0 14px hsl(var(--primary) / 0.5);
+    }
+    100% {
+        background-color: hsl(var(--primary) / 0);
+        box-shadow:
+            0 0 0 0 hsl(var(--primary) / 0),
+            0 0 0 0 hsl(var(--primary) / 0);
+    }
+}
+
+.task-pulse {
+    position: relative;
+    z-index: 5;
+    border-radius: 0.5rem;
+    animation: taskPulseOnce 1s ease-out 1;
+}
+
+/* --- Sidebar micro-animations ------------------------------------------- */
+@keyframes sidebar-item-in {
+    from {
+        opacity: 0;
+        transform: translateX(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+@keyframes sidebar-pill-breathe {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 hsl(var(--primary) / 0);
+    }
+    50% {
+        box-shadow: 0 0 10px 0 hsl(var(--primary) / 0.4);
+    }
+}
+/* Respect users who ask for less motion — kill the sidebar animations. */
+@media (prefers-reduced-motion: reduce) {
+    [class*='animate-[sidebar'] {
+        animation: none !important;
+    }
+}

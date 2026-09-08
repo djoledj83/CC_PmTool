@@ -1,0 +1,157 @@
+services:
+#   db:
+#     image: postgres:16-alpine
+#     container_name: pm-postgres
+#     restart: unless-stopped
+#     environment:
+#       POSTGRES_USER: postgres
+#       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+#       POSTGRES_DB: pmtool
+#     ports:
+#       - "5433:5433"
+#     volumes:
+#       - pm_pgdata:/var/lib/postgresql/data
+#     healthcheck:
+#       test: ["CMD-SHELL", "pg_isready -U postgres -d pmtool"]
+#       interval: 5s
+#       timeout: 5s
+#       retries: 10
+#     networks:
+#       - app-network
+
+  backend:
+    build: ./backend
+    container_name: PM-Backend
+    restart: unless-stopped
+    # backend/.env holds runtime secrets (DB URL, JWT, SMTP credentials)
+    # and is git-ignored. Values listed under `environment:` below take
+    # precedence over `env_file:`, so we leave SMTP keys OUT of
+    # `environment:` to let the user's backend/.env values reach the
+    # container.
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      # DATABASE_URL is intentionally NOT set here — it lives in
+      # backend/.env (git-ignored) so the Postgres password never
+      # appears in version control. The env_file directive above
+      # injects it into the container automatically. To change DB
+      # credentials per host, edit backend/.env on that host; do not
+      # add the URL back into this file.
+      # JWT signing secrets — REQUIRED, no fallback on purpose: every
+      # deployment must generate its own (see .env.example). Compose
+      # refuses to start if they are missing. ≥32 chars, never the old
+      # "change_me" placeholders (the runtime refuses to boot with them).
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env (openssl rand -hex 48)}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET in .env (openssl rand -hex 48)}
+      ACCESS_TOKEN_TTL: 15m
+      REFRESH_TOKEN_TTL_DAYS: 7
+      CORS_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+      PUBLIC_API_URL: ${API_URL:-http://localhost:5000}
+      # COOKIE_SECURE: controls the Secure flag on the refreshToken
+      # cookie. Default inference picks `false` when PUBLIC_API_URL is
+      # http:// — which is the only correct value on a plain-HTTP
+      # deployment, because Chromium/Firefox silently REJECT both
+      # Set-Cookie and Set-Cookie-with-Max-Age=0 on http when Secure
+      # is present. Flipping this to `true` without first standing up
+      # TLS is what caused the "logged back in as admin after logout"
+      # bug. Set to `true` explicitly once HTTPS is in front.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      APP_NAME: ${APP_NAME:-PM Tool}
+      # SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_SECURE /
+      # MAIL_FROM come from backend/.env via env_file above. Leave any
+      # of SMTP_HOST/SMTP_PORT empty there to have the mailer fall back
+      # to writing each message to /app/logs/sent-mail.log instead of
+      # actually sending it.
+    ports:
+      - "5000:5000"
+    volumes:
+      # Uploads + logs locations are configurable from the root .env:
+      #   UPLOADS_PATH / LOGS_PATH. Leave them unset to keep the default
+      #   Docker named volumes (pm_uploads / pm_logs). Set them to a host
+      #   path (e.g. /srv/pmtool/uploads) to store the data in a folder
+      #   you control — see .env.example. NOTE: switching from the named
+      #   volume to a host path does NOT move existing files; copy them
+      #   over first (see .env.example for the one-liner).
+      - ${UPLOADS_PATH:-pm_uploads}:/app/uploads
+      - ${LOGS_PATH:-pm_logs}:/app/logs
+      # Mount the canonical RELEASE_NOTES.md into the container so the
+      # "What's new" popover sees mtime changes immediately — no rebuild
+      # needed when editing the changelog. The file is read-only from the
+      # backend's perspective (the API only stats + reads it). Canonical
+      # location is backend/RELEASE_NOTES.md (single file — the old repo-root
+      # duplicate was consolidated away; see MANIFEST.md).
+      - ./backend/RELEASE_NOTES.md:/app/RELEASE_NOTES.md:ro
+    # /api/ready pings Postgres with `SELECT 1`. Liveness (/api/health)
+    # is intentionally NOT used here — that would keep the container
+    # marked "healthy" even if the DB had been down for hours, since
+    # /api/health returns 200 unconditionally. Pointing the healthcheck
+    # at /api/ready means the orchestrator (and `depends_on:
+    # condition: service_healthy` in any other service) actually
+    # reflects whether the API can do useful work.
+    #
+    # start_period: 30s gives the boot-time bootstrap (`ensureAdmin`,
+    # backfills, scheduler warm-ups) room to finish before the first
+    # check; without it a slow first /api/ready (cold prisma client +
+    # cold DB) could mark the container unhealthy in the first 10s.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5000/api/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    # depends_on:
+    #   db:
+    #     condition: service_healthy
+    networks:
+      - app-network
+
+  frontend:
+    # Production image — multi-stage build that runs `vite build` and
+    # serves the resulting static bundle from nginx:1.27-alpine on :80.
+    # The dev image at ./frontend/dockerfile (running `vite dev` with
+    # HMR + filesystem polling) is intentionally NOT used here: that
+    # was a footgun that meant prod traffic was being served by Vite's
+    # single-threaded dev server. See scalability audit in
+    # RELEASE_NOTES (section "Scaling to 300 concurrent users").
+    #
+    # VITE_API_URL is a BUILD-TIME variable for Vite — `args:` bakes
+    # it into the bundle. Changing it later requires a rebuild
+    # (`docker compose build frontend` or `up --build frontend`).
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_URL: ${API_URL:-http://localhost:5000}
+        # Branding (also build-time) — same APP_NAME the backend uses.
+        VITE_APP_NAME: ${APP_NAME:-PM Tool}
+        VITE_COPYRIGHT_HOLDER: ${COPYRIGHT_HOLDER:-Your Company}
+    container_name: PM-Frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    ports:
+      # nginx inside the container listens on :80; we expose it on the
+      # host's :3000 (change the left side to fit the target host).
+      - "3000:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+volumes:
+  pm_pgdata:
+  pm_uploads:
+  pm_logs:
+
+networks:
+  app-network:
+    driver: bridge

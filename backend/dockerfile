@@ -1,0 +1,36 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache openssl
+
+COPY package*.json ./
+COPY prisma ./prisma
+
+RUN npm install
+
+COPY . .
+
+RUN mkdir -p /app/uploads/avatars /app/uploads/files
+
+EXPOSE 5000
+
+# Schema sync on boot, in order of preference:
+#
+#   1. If migration files exist (after the one-time
+#      scripts/migrate-baseline.ps1 run — see docs/migrations.md),
+#      use `migrate deploy`: applies committed migrations in order,
+#      no-op when up to date, can NEVER drop data on its own.
+#   2. Until then, fall back to `db push` WITHOUT --accept-data-loss:
+#      additive changes apply automatically like before, but a
+#      destructive change now FAILS the boot loudly instead of
+#      silently dropping a column. (The old boot carried
+#      --accept-data-loss, which was the single biggest data-loss
+#      risk in the stack.)
+#
+# So "just rebuild" keeps working either way; the baseline script
+# upgrades you to real migration history whenever you run it.
+# scripts/ensure-baseline.js self-baselines a legacy db-push database
+# the first time it sees migration files (no manual `migrate resolve`
+# step needed on the server) and is a no-op afterwards.
+CMD ["sh", "-c", "if ls prisma/migrations/*/migration.sql >/dev/null 2>&1; then node scripts/ensure-baseline.js && npx prisma migrate deploy; else npx prisma db push --skip-generate; fi && node src/index.js"]

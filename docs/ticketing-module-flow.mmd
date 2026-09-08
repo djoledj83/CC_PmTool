@@ -1,0 +1,33 @@
+%% Ticketing — inbound email flow
+
+flowchart TD
+    CE[Customer email]
+    MB[(TicketMailbox)]
+    RAW[Fetch or webhook]
+    IL[(TicketIngestLog)]
+    DEDUP{Dedup?}
+    MATCH{Thread match}
+    CREATE[Create Ticket NEW]
+    APPEND[Append INBOUND message]
+    SKIP[Ingest SKIPPED]
+    T[(Ticket)]
+    TM[(TicketMessage)]
+    Q[Unassigned queue]
+    TAKE[Agent takes ticket]
+    REPLY[Outbound SMTP reply]
+
+    CE --> MB
+    MB --> RAW
+    RAW --> IL
+    IL --> DEDUP
+    DEDUP -->|duplicate| SKIP
+    DEDUP -->|new| MATCH
+    MATCH -->|found| APPEND
+    MATCH -->|new thread| CREATE
+    CREATE --> T
+    APPEND --> TM
+    TM --> T
+    T --> Q
+    Q --> TAKE
+    TAKE --> REPLY
+    REPLY --> TM

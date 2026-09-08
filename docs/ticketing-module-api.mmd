@@ -1,0 +1,16 @@
+%% Ticketing — API surface
+
+flowchart LR
+    UI[Frontend tickets page]
+    W[Mail worker]
+    DB[(PostgreSQL)]
+
+    UI --> T1[GET tickets]
+    UI --> T2[GET PATCH ticket by id]
+    UI --> T3[POST take assign close]
+    UI --> T4[POST messages]
+    W --> M2[POST mailbox sync]
+    W --> WH[POST inbound webhook]
+    T1 --> DB
+    M2 --> DB
+    WH --> DB

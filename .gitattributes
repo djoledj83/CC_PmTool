@@ -1,0 +1,32 @@
+# Normalise all text files to LF inside the repo regardless of which
+# OS the developer is on. Without this, a Windows checkout with
+# `core.autocrlf=true` will convert LF → CRLF on read and back again
+# on write — but if either side gets it wrong, `git status` shows
+# dozens of files as "modified" with ZERO content diff and commits
+# end up flip-flopping between line-ending styles.
+#
+# `text=auto` lets git auto-detect text vs binary; `eol=lf` forces
+# the in-repo (and checked-out) representation to be LF on every
+# platform. Editors on Windows handle LF files just fine today.
+* text=auto eol=lf
+
+# Explicitly mark common binary types so git never tries to do
+# line-ending or diff text shenanigans on them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.mp3 binary
+*.mp4 binary
+*.wav binary

@@ -1,0 +1,713 @@
+================================================================================
+  TICKETING MODULE — COMPLETE SCHEMA & DESIGN SPEC
+  PM Tool
+  Generated: 2026-05-29
+  Status: PROPOSAL — not yet in schema.prisma
+================================================================================
+
+This document describes the full data model, API surface, email ingestion,
+and UI concepts for an email-driven helpdesk / ticketing module integrated
+with the existing Node + Prisma + PostgreSQL stack.
+
+Goals (from product):
+  - Listen to a support mailbox; each new email conversation becomes a ticket.
+  - Colleagues see an unassigned queue and can assign a ticket to themselves.
+  - Replies on the same email thread attach to the same ticket (not new tickets).
+  - After assignment, new mail on that thread is tied to the ticket and assignee.
+
+Existing app context:
+  - Outbound email only today (backend/src/lib/mailer.js, notify.js).
+  - No inbound IMAP/webhook yet — this module adds it.
+  - Patterns to mirror: Task, Note, Conversation/Message, Client, Team, RBAC.
+
+Deployment note:
+  - This project uses `npx prisma db push` (no migration SQL files).
+  - After approving this spec, append the Prisma blocks to schema.prisma and
+    run `npx prisma generate` + `npx prisma db push` on Contabo.
+
+
+================================================================================
+1. HIGH-LEVEL FLOW
+================================================================================
+
+  Customer email                    Support mailbox (IMAP / Graph / webhook)
+        |                                        |
+        v                                        v
+  [ Internet ] ----------------------------> [ Mail ingest worker ]
+                                                    |
+                    Parse headers (Message-ID, In-Reply-To, References)
+                    Match existing ticket OR create new Ticket
+                                                    |
+                                                    v
+                                            [ PostgreSQL ]
+                                                    |
+        +---------------------------+-------------+-------------+
+        |                           |                           |
+   Unassigned queue            Ticket detail UI            Outbound reply
+   (self-assign)                (thread + notes)           (SMTP + threading)
+
+
+================================================================================
+2. ENUMS (add to schema.prisma)
+================================================================================
+
+enum TicketStatus {
+  NEW           // Created from email, never touched
+  OPEN          // Someone is working on it (often same as assigned)
+  PENDING       // Waiting on customer / third party
+  RESOLVED      // Answer sent, awaiting confirmation
+  CLOSED        // Done — no further action expected
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum TicketMessageDirection {
+  INBOUND       // From customer / external sender via email
+  OUTBOUND      // Sent to customer from the app (agent reply)
+  INTERNAL      // Internal note — never emailed, visible to agents only
+}
+
+enum TicketMailboxProtocol {
+  IMAP          // Poll inbox (generic)
+  MICROSOFT_GRAPH
+  GMAIL_API
+  WEBHOOK       // SendGrid Inbound Parse, Mailgun, etc.
+}
+
+enum TicketIngestStatus {
+  PENDING       // Fetched, not yet processed
+  PROCESSED     // Linked to ticket / message
+  SKIPPED       // Duplicate or ignored (auto-reply, spam rule)
+  FAILED        // Parse error — retry or manual review
+}
+
+
+================================================================================
+3. PRISMA MODELS — CORE TICKETING
+================================================================================
+
+// ---------------------------------------------------------------------------
+// TicketMailbox — one configured inbound address (support@, team-a@, …)
+// ---------------------------------------------------------------------------
+// Admins configure mailboxes. Each mailbox can optionally scope tickets to
+// a Team. The ingest worker polls or receives webhooks per mailbox.
+
+model TicketMailbox {
+  id              String                @id @default(cuid())
+  name            String                // Display name: "Support"
+  emailAddress    String                // support@company.com (From on outbound)
+  // Optional team scope: tickets from this mailbox default to this team
+  teamId          String?
+  protocol        TicketMailboxProtocol @default(IMAP)
+  enabled         Boolean               @default(true)
+
+  // IMAP (when protocol = IMAP)
+  imapHost        String?
+  imapPort        Int?
+  imapSecure      Boolean               @default(true)
+  imapUser        String?
+  imapPassword    String?               // Encrypt at rest in app layer / env
+
+  // OAuth / API (when protocol = MICROSOFT_GRAPH | GMAIL_API)
+  oauthTenantId   String?
+  oauthClientId   String?
+  oauthSecretRef  String?               // Or store token JSON encrypted
+
+  // Webhook (when protocol = WEBHOOK)
+  webhookSecret String?               // Verify inbound POST signatures
+
+  // Outbound: reuse global SMTP or per-mailbox override
+  smtpFromName    String?
+  smtpReplyTo     String?               // Optional Reply-To header
+
+  lastSyncAt      DateTime?
+  lastSyncError   String?
+  syncCursor      String?               // IMAP UID / delta token / history id
+
+  createdById     String
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  team            Team?                 @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  createdBy       User                  @relation("TicketMailboxCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  tickets         Ticket[]
+  ingestLogs      TicketIngestLog[]
+
+  @@unique([emailAddress])
+  @@index([teamId])
+  @@index([enabled])
+}
+
+// ---------------------------------------------------------------------------
+// Ticket — one support case (email thread anchor)
+// ---------------------------------------------------------------------------
+
+model Ticket {
+  id              String           @id @default(cuid())
+  // Human-readable key for subjects and agent comms: TKT-00042
+  number          Int              // Monotonic per workspace; assign in app on create
+  mailboxId       String
+  status          TicketStatus     @default(NEW)
+  priority        TicketPriority   @default(NORMAL)
+
+  subject         String           // Normalized thread subject (no Re:/Fwd:)
+  // Requester — external person who emailed in (may not be a User)
+  requesterEmail  String
+  requesterName   String?
+
+  // Optional link to CRM Client / contact (manual or auto-match by email)
+  clientId        String?
+  clientContactId String?
+
+  // Assignment — self-service "take ticket"
+  assigneeId      String?          // User who owns the ticket
+  assignedAt      DateTime?
+
+  // Optional link to internal work
+  projectId       String?          // If escalated to a project
+  taskId          String?          // If promoted to a task
+
+  // Optional team queue (from mailbox default or manual)
+  teamId          String?
+
+  // Threading keys for inbound dedup / reply matching
+  rootMessageId   String?          // First Message-ID in thread (RFC 5322)
+  // Ticket token embedded in outbound subjects: [TKT-00042]
+  publicToken     String           @unique @default(cuid())
+
+  // SLA / housekeeping
+  firstResponseAt DateTime?        // First OUTBOUND to customer
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+  closedById      String?
+
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  mailbox         TicketMailbox    @relation(fields: [mailboxId], references: [id], onDelete: Restrict)
+  assignee        User?            @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  closedBy        User?            @relation("TicketClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  client          Client?          @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  team            Team?            @relation("TeamTickets", fields: [teamId], references: [id], onDelete: SetNull)
+  project         Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  task            Task?            @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  messages        TicketMessage[]
+  participants    TicketParticipant[]
+  tags            TicketTagOnTicket[]
+  activityEvents  ActivityEvent[]  // New ActivityEventType values — see §7
+
+  @@unique([number])
+  @@index([mailboxId, status])
+  @@index([assigneeId, status])
+  @@index([teamId, status])
+  @@index([requesterEmail])
+  @@index([rootMessageId])
+  @@index([status, updatedAt])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// TicketMessage — one row per email (inbound/outbound) or internal note
+// ---------------------------------------------------------------------------
+
+model TicketMessage {
+  id              String                 @id @default(cuid())
+  ticketId        String
+  direction       TicketMessageDirection
+  // For INTERNAL notes only — never sent by email
+  isInternal      Boolean                @default(false)
+
+  fromEmail       String
+  fromName        String?
+  toEmails        String[]               // Postgres text[]
+  ccEmails        String[]               @default([])
+
+  subject         String?
+  bodyText        String?                @db.Text
+  bodyHtml        String?                @db.Text
+
+  // RFC 5322 identifiers — critical for threading
+  messageId       String?                @unique  // Message-ID header
+  inReplyTo       String?                // In-Reply-To
+  references      String[]               @default([])  // References header split
+
+  // Who sent from inside the app (null for pure inbound)
+  authorId        String?
+
+  sentAt          DateTime               // Date header or receivedAt
+  createdAt       DateTime               @default(now())
+
+  ticket          Ticket                 @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author          User?                  @relation("TicketMessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  attachments     TicketMessageAttachment[]
+  ingestLog       TicketIngestLog?
+
+  @@index([ticketId, createdAt])
+  @@index([inReplyTo])
+}
+
+// ---------------------------------------------------------------------------
+// TicketMessageAttachment — files on a message (like MessageAttachment)
+// ---------------------------------------------------------------------------
+
+model TicketMessageAttachment {
+  id              String   @id @default(cuid())
+  messageId       String
+  fileName        String
+  mimeType        String?
+  sizeBytes       Int      @default(0)
+  storagePath     String   // Under uploads/tickets/…
+  contentId       String?  // MIME Content-ID for inline images
+  createdAt       DateTime @default(now())
+
+  message         TicketMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+// ---------------------------------------------------------------------------
+// TicketParticipant — watchers / collaborators (optional v1)
+// ---------------------------------------------------------------------------
+
+model TicketParticipant {
+  id        String   @id @default(cuid())
+  ticketId  String
+  userId    String
+  addedAt   DateTime @default(now())
+  addedById String?
+
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user      User     @relation("TicketParticipantUser", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy   User?    @relation("TicketParticipantAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@unique([ticketId, userId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// TicketTag + join (optional — admin-defined labels)
+// ---------------------------------------------------------------------------
+
+model TicketTag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String?
+  createdAt DateTime @default(now())
+
+  tickets   TicketTagOnTicket[]
+}
+
+model TicketTagOnTicket {
+  ticketId  String
+  tagId     String
+  addedAt   DateTime @default(now())
+
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  tag       TicketTag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([ticketId, tagId])
+}
+
+
+================================================================================
+4. PRISMA MODELS — EMAIL INGESTION & DEDUP
+================================================================================
+
+// ---------------------------------------------------------------------------
+// TicketIngestLog — one raw fetched email before/after processing
+// ---------------------------------------------------------------------------
+// Keeps audit trail and prevents double-import. Worker creates row PENDING,
+// then PROCESSED with ticketId + messageId or SKIPPED/FAILED.
+
+model TicketIngestLog {
+  id              String             @id @default(cuid())
+  mailboxId       String
+  status          TicketIngestStatus @default(PENDING)
+
+  // Provider-specific dedup key (IMAP UID, Graph message id, webhook id)
+  externalUid     String
+  messageId       String?            // Parsed Message-ID if present
+
+  ticketId        String?
+  ticketMessageId String?            @unique
+
+  fromEmail       String?
+  subject         String?
+  receivedAt      DateTime?
+  error           String?            @db.Text
+  rawHeaders      Json?              // Sanitized header map
+  // Do not store full raw MIME long-term if size is concern — optional S3 path
+  rawStoragePath  String?
+
+  processedAt     DateTime?
+  createdAt       DateTime           @default(now())
+
+  mailbox         TicketMailbox      @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  ticket          Ticket?            @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  ticketMessage   TicketMessage?     @relation(fields: [ticketMessageId], references: [id], onDelete: SetNull)
+
+  @@unique([mailboxId, externalUid])
+  @@index([status, createdAt])
+  @@index([messageId])
+}
+
+
+// Add to Ticket model (relation):
+//   ingestLogs TicketIngestLog[]
+
+
+================================================================================
+5. CHANGES TO EXISTING MODELS (relations only)
+================================================================================
+
+User — add relations:
+  assignedTickets       Ticket[]              @relation("TicketAssignee")
+  closedTickets         Ticket[]              @relation("TicketClosedBy")
+  ticketMessages        TicketMessage[]       @relation("TicketMessageAuthor")
+  ticketParticipations  TicketParticipant[]   @relation("TicketParticipantUser")
+  addedTicketParticipants TicketParticipant[] @relation("TicketParticipantAddedBy")
+  createdTicketMailboxes TicketMailbox[]      @relation("TicketMailboxCreatedBy")
+
+Team — add:
+  tickets               Ticket[]              @relation("TeamTickets")
+
+Client — add:
+  tickets               Ticket[]
+
+Project — add:
+  tickets               Ticket[]
+
+Task — add (optional one-to-one back-link):
+  ticket                Ticket?
+
+ActivityEvent — add optional fields (or meta JSON only):
+  ticketId              String?
+  ticket                Ticket?   @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+
+
+================================================================================
+6. TICKET NUMBER SEQUENCE
+================================================================================
+
+Option A (recommended): allocate `number` in application code inside a transaction:
+  SELECT COALESCE(MAX(number), 0) + 1 FROM "Ticket" FOR UPDATE;
+  (Use prisma.$transaction with raw query or a dedicated TicketCounter table.)
+
+Option B: separate model:
+
+model TicketCounter {
+  id    String @id @default("singleton")
+  value Int    @default(0)
+}
+
+Display format in UI/email subject:
+  TKT-{number padded to 5 digits}  e.g. TKT-00042
+  Subject outbound: "Re: [TKT-00042] Original subject"
+
+
+================================================================================
+7. ACTIVITY & NOTIFICATIONS (extend existing enums)
+================================================================================
+
+Add to enum ActivityEventType:
+  TICKET_CREATED
+  TICKET_ASSIGNED
+  TICKET_UNASSIGNED
+  TICKET_STATUS_CHANGED
+  TICKET_PRIORITY_CHANGED
+  TICKET_MESSAGE_INBOUND
+  TICKET_MESSAGE_OUTBOUND
+  TICKET_INTERNAL_NOTE
+  TICKET_LINKED_PROJECT
+  TICKET_LINKED_TASK
+  TICKET_CLOSED
+
+Add to enum NotificationType:
+  TICKET_CREATED
+  TICKET_ASSIGNED_TO_YOU
+  TICKET_REPLY_INBOUND          // New customer reply on your ticket
+  TICKET_MENTION                // If @mention in internal note (future)
+
+
+================================================================================
+8. RBAC / CAPABILITIES (backend/src/lib/capabilities.js)
+================================================================================
+
+Suggested capability keys:
+  ticket:view              // See ticket module
+  ticket:view_all          // See all mailboxes / tickets (not only own team)
+  ticket:take              // Self-assign unassigned tickets
+  ticket:assign_others     // Assign/reassign to any agent (admin/manager)
+  ticket:reply             // Send outbound email replies
+  ticket:internal_note     // Post internal notes
+  ticket:close             // Close / resolve tickets
+  ticket:manage_mailbox    // Configure mailboxes (admin)
+  ticket:manage_tags       // Manage ticket tags
+
+Default role mapping (proposal):
+  ADMIN     — all ticket:*
+  MANAGER   — view, take, reply, internal_note, close, assign_others (team scope)
+  USER      — view + take + reply on team-scoped tickets only if participant
+
+
+================================================================================
+9. REST API ROUTES (backend/src/routes/tickets.js)
+================================================================================
+
+Base path: /api/tickets
+
+Mailboxes (admin):
+  GET    /mailboxes
+  POST   /mailboxes
+  PATCH  /mailboxes/:id
+  DELETE /mailboxes/:id
+  POST   /mailboxes/:id/sync          // Manual trigger ingest
+  GET    /mailboxes/:id/health
+
+Tickets:
+  GET    /                         // List with filters: status, assigneeId,
+                                   //   teamId, mailboxId, q, unassignedOnly
+  GET    /:id                      // Detail + messages + participants
+  PATCH  /:id                      // status, priority, teamId, clientId,
+                                   //   projectId, taskId
+  POST   /:id/take                 // assigneeId = current user (if unassigned)
+  POST   /:id/assign               // manager assigns userId
+  POST   /:id/unassign
+  POST   /:id/close
+  POST   /:id/reopen
+
+Messages:
+  POST   /:id/messages             // body: { content, isInternal }
+                                   // If !isInternal → send email + store OUTBOUND
+  GET    /:id/messages             // Paginated thread
+
+Tags (optional):
+  GET    /tags
+  POST   /tags
+  POST   /:id/tags/:tagId
+  DELETE /:id/tags/:tagId
+
+Stats (dashboard):
+  GET    /stats/summary            // open count, unassigned, by status
+
+
+Webhook (no auth cookie — shared secret):
+  POST   /webhooks/inbound/:mailboxId   // Raw MIME or JSON from provider
+
+
+================================================================================
+10. INBOUND THREAD MATCHING ALGORITHM
+================================================================================
+
+When ingest worker receives a new raw email:
+
+Step 1 — Dedup
+  If TicketIngestLog exists for (mailboxId, externalUid) → SKIP.
+  If Message-ID already in TicketMessage.messageId → SKIP.
+
+Step 2 — Find existing ticket (in order)
+  a) Parse In-Reply-To → lookup TicketMessage.messageId → ticketId
+  b) Parse References[] (newest first) → same lookup
+  c) Subject token: regex \[TKT-(\d+)\] → Ticket.number
+  d) Plus-address: ticket+{publicToken}@domain → Ticket.publicToken
+  e) Fallback: same mailboxId + normalized subject + requesterEmail within 30 days
+     (configurable) — attach to latest OPEN ticket or create new
+
+Step 3 — Create or append
+  If ticket found:
+    - Create TicketMessage direction=INBOUND
+    - If ticket.assigneeId set → notify assignee (TICKET_REPLY_INBOUND)
+    - Else → notify team / unassigned queue subscribers
+  Else:
+    - Allocate Ticket.number, set status=NEW, rootMessageId = Message-ID
+    - Create first TicketMessage INBOUND
+    - Notify ticket:view_all or team
+
+Step 4 — Auto-reply detection (optional)
+  Skip tickets from mailer-daemon, noreply@, Out-of-Office with no In-Reply-To
+  → TicketIngestLog status=SKIPPED
+
+
+================================================================================
+11. OUTBOUND REPLY (from app)
+================================================================================
+
+When agent posts non-internal message:
+
+  1. Build MIME with:
+     - From: mailbox.emailAddress (or SMTP_FROM)
+     - To: ticket.requesterEmail (+ original To/Cc if reply-all needed)
+     - Subject: "Re: [TKT-00042] {ticket.subject}"
+     - In-Reply-To: last inbound Message-ID on ticket
+     - References: chain from thread
+     - Body: agent HTML/text (sanitized)
+
+  2. sendMail() via existing mailer.js (extend for custom headers Message-ID)
+
+  3. Create TicketMessage direction=OUTBOUND, authorId=agent
+
+  4. Set ticket.firstResponseAt if first outbound
+
+  5. Optionally status → PENDING or OPEN
+
+
+================================================================================
+12. BACKGROUND WORKERS
+================================================================================
+
+New file: backend/src/lib/ticketMailIngest.js
+
+  - startTicketMailIngestScheduler() in backend/src/index.js (like sprint snapshots)
+  - Every N minutes (env TICKET_MAIL_SYNC_INTERVAL_MS, default 120000):
+      for each TicketMailbox where enabled:
+        fetch new messages since syncCursor
+        enqueue processInboundMime(mailbox, raw)
+
+  - For WEBHOOK protocol: no poll; POST handler calls same processInboundMime
+
+New file: backend/src/routes/ticketWebhooks.js (or under tickets.js)
+
+
+================================================================================
+13. FRONTEND MODULE (outline)
+================================================================================
+
+Route: /tickets (sidebar under Work or Support)
+
+Views:
+  A) Board — columns by status (like Planning sprints / Jira)
+       NEW | OPEN | PENDING | RESOLVED | CLOSED
+       Cards show number, subject, requester, assignee, age
+       Unassigned filter default for queue workers
+
+  B) Ticket detail — split pane
+       Left: message thread (inbound/outbound/internal styled like chat)
+       Right: metadata (assignee, take button, status, priority, client, links)
+       Composer: Public reply | Internal note toggle
+       Attachments on messages
+
+  C) Settings (admin) — /tickets/settings/mailboxes
+       CRUD mailboxes, test connection, last sync status
+
+Deep link: /tickets/:id
+
+
+================================================================================
+14. ENVIRONMENT VARIABLES
+================================================================================
+
+# Global (existing)
+SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SECURE, MAIL_FROM
+
+# Ticketing module
+TICKET_MAIL_SYNC_INTERVAL_MS=120000
+TICKET_MAIL_SYNC_ENABLED=true
+TICKET_SUBJECT_TOKEN_PREFIX=TKT
+TICKET_FALLBACK_THREAD_DAYS=30
+TICKET_UPLOAD_MAX_MB=25
+TICKET_WEBHOOK_BASE_SECRET=...          # Rotate in production
+
+# Per-mailbox secrets can live in DB (encrypted) for IMAP passwords
+
+
+================================================================================
+15. ENTITY RELATIONSHIP DIAGRAM (ASCII)
+================================================================================
+
+  TicketMailbox 1───* Ticket 1───* TicketMessage 1───* TicketMessageAttachment
+        |                |                |
+        |                |                └── (optional) TicketIngestLog 1──1
+        |                |
+        |                ├──* TicketParticipant *── User
+        |                ├──* TicketTagOnTicket *── TicketTag
+        |                ├──? assignee ── User
+        |                ├──? team ── Team
+        |                ├──? client ── Client
+        |                ├──? project ── Project
+        |                └──? task ── Task
+        |
+        └──* TicketIngestLog
+
+  User (existing) ←── assignedTickets, ticketMessages, …
+
+
+================================================================================
+16. PHASED IMPLEMENTATION CHECKLIST
+================================================================================
+
+Phase 1 — Data + manual tickets (no email yet)
+  [ ] Add Prisma models §3 (minus ingest optional)
+  [ ] Routes: CRUD tickets, take, assign, messages (internal only)
+  [ ] Frontend board + detail
+
+Phase 2 — Outbound email replies
+  [ ] Extend mailer for Message-ID / threading headers
+  [ ] POST /:id/messages sends real email
+
+Phase 3 — Inbound IMAP (or one provider)
+  [ ] TicketMailbox + TicketIngestLog
+  [ ] Worker + thread matching §10
+  [ ] Webhook optional
+
+Phase 4 — Polish
+  [ ] Notifications + ActivityEvent
+  [ ] Link to Project/Task
+  [ ] Tags, stats, SLA fields
+
+
+================================================================================
+17. SAMPLE PRISMA SNIPPET (copy-paste block — append to schema.prisma)
+================================================================================
+
+// --- Ticketing module (see docs/ticketing-module-schema.txt) ---------------
+
+enum TicketStatus {
+  NEW
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum TicketMessageDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL
+}
+
+enum TicketMailboxProtocol {
+  IMAP
+  MICROSOFT_GRAPH
+  GMAIL_API
+  WEBHOOK
+}
+
+enum TicketIngestStatus {
+  PENDING
+  PROCESSED
+  SKIPPED
+  FAILED
+}
+
+// … then paste full models from sections 3–4 above, and User/Team/Client/Project
+// relation fields from section 5.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

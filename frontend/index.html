@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Theme-aware favicon: browsers that support `media` on icon links
+         pick the dark-background icon when the OS/browser is in dark mode;
+         the first (no-media) link is the default/fallback for everyone else. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="/favicon_bg_dark.svg"
+      media="(prefers-color-scheme: dark)"
+    />
+    <!-- Placeholder only — main.jsx sets document.title from appInfo.js
+         (VITE_APP_NAME) at startup. -->
+    <title>PM Tool</title>
+    <!-- No-flash theme bootstrap. External file (public/theme-init.js)
+         rather than inline because the production nginx CSP is
+         script-src 'self' — inline scripts are blocked by design. -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

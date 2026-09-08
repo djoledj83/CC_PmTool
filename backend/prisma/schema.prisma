@@ -1,0 +1,2743 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  // MANAGER is a project-scoped editor: can create/edit/delete tasks
+  // and subtasks inside any project they can see, but cannot touch the
+  // project itself (no create / edit / close / delete) or any other
+  // admin-only feature (templates, user management, workspace
+  // insights, etc.). Visibility rules match USER.
+  MANAGER
+  // APP_MODERATOR is a USER-with-extras: can create/edit applications
+  // and post comments/notes on releases. Project visibility rules
+  // match USER (no special project powers). Anything beyond app
+  // metadata + comments lives behind per-user capability flags so
+  // admins can hand out fine-grained powers like "can declare a
+  // release went to PROD" without granting full ADMIN.
+  APP_MODERATOR
+  USER
+  // REQUESTER is a ticketing-only role: it can open tickets and see /
+  // comment on its own, picking a project at creation. It has NO access
+  // to the PM Tool surfaces (projects, tasks, sprints, etc.) — the
+  // frontend hides everything but the Ticketing portal and the backend
+  // rejects PM routes for it. "Agents" who answer tickets are existing
+  // staff granted the `ticket:manage` capability instead of a role.
+  REQUESTER
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+model User {
+  id                 String     @id @default(cuid())
+  email              String     @unique
+  password           String
+  name               String
+  phone              String?
+  avatarUrl          String?
+  // Free-text job title shown next to the name in profile / Users
+  // listing. Optional so existing rows stay valid.
+  position           String?
+  // Payroll / accounting employee code. Admin-managed (set from the Users
+  // dialog), surfaced read-only on the profile and in the time export.
+  employeeCode       String?
+  // Extra business / personal info the user fills out on their own
+  // profile page. All optional so existing accounts stay valid.
+  //   - country  : free text (kept loose for now; we may swap for a
+  //                CountryOption FK later if we want to constrain to
+  //                an admin-managed list).
+  //   - currency : free text such as "EUR" / "USD" / "RSD" — just a
+  //                ticker the user picks for themselves.
+  //   - about    : long-form bio / blurb shown on the profile page.
+  //   - teamLeaderId  : the user's direct manager — chosen from any
+  //                    existing user. Self-relation below.
+  //   - businessUnitId: the org unit this user belongs to, picked
+  //                    from an admin-defined catalog
+  //                    (BusinessUnitOption).
+  country            String?
+  currency           String?
+  about              String?
+  teamLeaderId       String?
+  teamLeader         User?      @relation("UserTeamLeader", fields: [teamLeaderId], references: [id], onDelete: SetNull)
+  directReports      User[]     @relation("UserTeamLeader")
+  businessUnitId     String?
+  businessUnit       BusinessUnitOption? @relation(fields: [businessUnitId], references: [id], onDelete: SetNull)
+  // The external organisation (client) a REQUESTER belongs to. Scopes an
+  // external user to their own tickets + their organisation's tickets.
+  // NULL for internal staff. SetNull so deleting a client keeps the user.
+  clientId           String?
+  client             Client?    @relation("ClientUsers", fields: [clientId], references: [id], onDelete: SetNull)
+  // External requesters are scoped to their organisation (client) and
+  // must have one. Internal requesters (our employees) have no org and
+  // see the whole shared ticket queue. Only meaningful for REQUESTERs.
+  external           Boolean    @default(false)
+  // Which ticket request types an INTERNAL requester may raise. No rows
+  // = none (strict). External requesters are scoped via their client.
+  ticketTypes        UserTicketType[] @relation("UserTicketTypes")
+  // Updated whenever a user successfully exchanges credentials for an
+  // access token. Surfaced in the Users admin page.
+  lastLoginAt        DateTime?
+  // When true, this user must keep their working log filled per the
+  // admin TimeLogPolicy — they get a daily reminder if they're short.
+  // Off by default so nobody is nagged until an admin opts them in.
+  timeLogMandatory   Boolean    @default(false)
+  // Date-only marker (local day) of the last time-log reminder
+  // notification sent to this user — used to send at most one per day.
+  lastTimeLogNotifiedOn DateTime?
+  role               Role       @default(USER)
+  // Per-user capability overrides. Granular permission flags (e.g.
+  // "app:phase:declare", "app:checkpoint:add") admins can toggle on
+  // top of the broad `role`. The effective permission set is the
+  // union of the role's defaults and this list, so a USER can be
+  // promoted to "can declare app phase" without becoming an admin.
+  // See backend/src/lib/permissions.js for the canonical key list
+  // and role-default mapping.
+  capabilities       String[]   @default([])
+  // ACTIVE by default keeps admin-created accounts and existing rows working;
+  // public sign-ups land as PENDING and need an admin to approve them.
+  status             UserStatus @default(ACTIVE)
+  approvedAt         DateTime?
+  // Monotonic counter bumped on logout so any outstanding refresh
+  // tokens for this user become invalid even if the browser failed
+  // to clear the cookie (e.g. NODE_ENV=production + plain HTTP makes
+  // Set-Cookie silently rejected). The refresh route compares this
+  // value against the JWT's `tv` claim and rejects on mismatch.
+  tokenVersion       Int        @default(0)
+  // Opt-out switch for email notifications. Defaults to true so we mirror
+  // every in-app notification by email; users can flip this off later from
+  // their profile settings.
+  emailNotifications Boolean    @default(true)
+  // UI theme preference synced across devices: 'light' | 'dark' |
+  // 'dim' | 'system'. Plain string (not an enum) so adding a value
+  // (like 'dim') needs no schema change — just widen the Zod enum in
+  // routes/users.js. ('dim' is a softer grey dark variant.)
+  themePreference    String     @default("system")
+  // Personal drag-sorted ordering of the Projects list — an array of
+  // project IDs. Projects not in the array fall back to default order.
+  // Synced server-side so the order follows the user across devices.
+  projectOrder       Json?
+  // Last time the user dismissed the in-app changelog popover. The
+  // TopBar Sparkles indicator pulses if the latest entry in
+  // RELEASE_NOTES.md (timestamp tracked server-side) is newer than
+  // this. NULL = never seen → indicator pulses on first visit.
+  lastSeenReleaseNotesAt DateTime?
+  // Rolling total of bytes this user has uploaded to project files
+  // (avatars and app logos are NOT counted — they're capped tightly
+  // per-file already and users only ever hold one of each). Used to
+  // enforce a per-user quota in lib/upload.js: when an upload would
+  // push this value past the configured cap (env var
+  // USER_UPLOAD_QUOTA_BYTES, default 2 GiB), the API returns 413. The
+  // counter is incremented inside the FileAttachment create
+  // transaction and decremented when an admin deletes the file, so it
+  // stays consistent without a periodic recount. BigInt because
+  // Number can lose precision beyond ~9 PB which we'll hit eventually
+  // on a long-lived install if anyone disables the cap.
+  uploadedBytesTotal BigInt     @default(0)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  projects         Project[]            @relation("ProjectOwner")
+  reportedProjects Project[]            @relation("ProjectReporter")
+  assignedTasks    Task[]               @relation("TaskAssignee")
+  createdTasks     Task[]               @relation("TaskCreatedBy")
+  approvedTasks    Task[]               @relation("TaskApprovedBy")
+  rejectedTasks    Task[]               @relation("TaskRejectedBy")
+  notes            Note[]
+  uploadedFiles    FileAttachment[]
+  resetTokens      PasswordResetToken[]
+
+  conversationParticipants ConversationParticipant[]
+  sentMessages             Message[]                 @relation("MessageSender")
+  notifications            Notification[]            @relation("UserNotifications")
+  triggeredNotifications   Notification[]            @relation("ActorNotifications")
+
+  projectParticipations    ProjectParticipant[] @relation("ProjectParticipations")
+  addedProjectParticipants ProjectParticipant[] @relation("ProjectParticipantAddedBy")
+
+  todos TodoItem[]
+
+  // Plan-level activities (meetings, calls, reminders, etc.) the user
+  // either created or is on the hook for.
+  assignedActivities ProjectActivity[] @relation("ProjectActivityAssignee")
+  createdActivities  ProjectActivity[] @relation("ProjectActivityCreatedBy")
+
+  // Change Requests this user has created. onDelete=Restrict on the
+  // ChangeRequest side prevents accidental orphaning — to delete a user
+  // who has created CRs, an admin must transfer or remove those CRs
+  // first. Matches the audit-log philosophy: who created what is
+  // permanent history.
+  createdChangeRequests ChangeRequest[] @relation("ChangeRequestCreatedBy")
+
+  // Audit trail entries the user triggered (status changes, etc.).
+  activityEvents ActivityEvent[] @relation("ActivityEventActor")
+
+  // Task reassignment requests this user is involved in.
+  proposedReassignments TaskReassignment[] @relation("ReassignmentProposer")
+  reassignmentsFrom     TaskReassignment[] @relation("ReassignmentFrom")
+  reassignmentsTo       TaskReassignment[] @relation("ReassignmentTo")
+  decidedReassignments  TaskReassignment[] @relation("ReassignmentDecidedBy")
+
+  // Broadcast announcements this user authored + their acknowledgements.
+  authoredAnnouncements Announcement[]     @relation("AnnouncementAuthor")
+  announcementAcks      AnnouncementAck[]  @relation("UserAnnouncementAcks")
+
+  // Team membership / authorship.
+  createdTeams      Team[]        @relation("TeamCreatedBy")
+  teamMemberships   TeamMember[]  @relation("TeamMembership")
+  addedTeamMembers  TeamMember[]  @relation("TeamMemberAddedBy")
+  addedProjectTeams ProjectTeam[] @relation("ProjectTeamAddedBy")
+  addedPhaseTeams   PhaseTeam[]   @relation("PhaseTeamAddedBy")
+
+  // External contacts the user added to projects.
+  createdContacts ProjectContact[] @relation("ContactCreator")
+
+  // Planning sprints (cross-project, team-scoped).
+  createdPlanningSprints   PlanningSprint[]     @relation("PlanningSprintAuthor")
+  addedPlanningSprintTasks PlanningSprintTask[] @relation("PlanningSprintTaskAddedBy")
+  createdPlanningSchedules PlanningSprintSchedule[] @relation("PlanningScheduleAuthor")
+  planningCapacities       PlanningSprintCapacity[] @relation("PlanningSprintCapacityUser")
+  pushTokens               PushToken[]
+  createdProjectGroups     ProjectGroup[]           @relation("ProjectGroupCreator")
+  updatedPlanningSchedules PlanningSprintSchedule[] @relation("PlanningScheduleEditor")
+
+  // Time tracking — entries the user logged (live timer or manual).
+  timeEntries TimeEntry[] @relation("TimeEntryUser")
+
+  // Sprints / iterations — created sprints + per-sprint capacity rows.
+  createdSprints   Sprint[]         @relation("SprintAuthor")
+  sprintCapacities SprintCapacity[] @relation("SprintCapacityUser")
+  // Sprint-scheduler audit links: who first set up the schedule and
+  // who last edited it. Both nullable on the schedule side; createdBy
+  // is required at insert-time but the back-relation must still be
+  // declared on the user.
+  createdSprintSchedules SprintSchedule[] @relation("SprintScheduleAuthor")
+  editedSprintSchedules  SprintSchedule[] @relation("SprintScheduleEditor")
+
+  // Applications catalogue authorship & contributions.
+  createdApplications Application[]       @relation("ApplicationCreator")
+  uploadedReleases    AppRelease[]        @relation("AppReleaseUploader")
+  appReleaseNotes     AppReleaseNote[]    @relation("AppReleaseNoteAuthor")
+  releaseCheckpoints  ReleaseCheckpoint[] @relation("ReleaseCheckpointAuthor")
+
+  // Personal highlights — projects pinned to the top, tasks flagged
+  // as "today's focus", starred sprints, prod-release flags,
+  // bookmarked activity rows. One row per (user, kind, refId).
+  pins UserPin[] @relation("UserPinsForUser")
+
+  // Ticketing — tickets opened (reporter), assigned, or closed by this
+  // user, plus messages they authored in ticket conversations.
+  reportedTickets Ticket[]        @relation("TicketReporter")
+  assignedTickets Ticket[]        @relation("TicketAssignee")
+  closedTickets   Ticket[]        @relation("TicketClosedBy")
+  ticketMessages  TicketMessage[] @relation("TicketMessageAuthor")
+
+  // Ticketing — request types authored, ticket watch/participation, and
+  // timeline events this user triggered.
+  createdTicketRequestTypes TicketRequestType[] @relation("TicketRequestTypeCreatedBy")
+  ticketParticipations      TicketParticipant[] @relation("TicketParticipantUser")
+  ticketReads               TicketRead[]        @relation("TicketReadUser")
+  addedTicketParticipants   TicketParticipant[] @relation("TicketParticipantAddedBy")
+  ticketShares              TicketShare[]       @relation("TicketShareUser")
+  sharedTickets             TicketShare[]       @relation("TicketShareSharedBy")
+  ticketEvents              TicketEvent[]       @relation("TicketEventActor")
+  ticketAttachments         TicketAttachment[]  @relation("TicketAttachmentUploader")
+  ticketTypeAccess          TicketRequestTypeAgent[] @relation("TicketTypeAgentUser")
+  requesterGroupMemberships RequesterGroupMember[]   @relation("RequesterGroupMemberUser")
+  exportRecords             ExportRecord[]           @relation("UserExports")
+}
+
+// Per-user highlights / bookmarks. Single table covers every
+// "user X marked Y" affordance in the app so we don't sprout one
+// schema per feature:
+//
+//   - PROJECT     : pinned to the top of the Projects list.
+//   - TASK_FOCUS  : task / subtask flagged as the user's "today's
+//                   focus" (rendered with a coloured stripe).
+//   - SPRINT_GOAL : starred sprint goal (visible on the sprint card).
+//   - RELEASE_PROD: application release flagged by the user as the
+//                   current production target (drives a compare hint
+//                   in the application timeline).
+//   - ACTIVITY    : activity feed row bookmarked for follow-up.
+//
+// refId is *not* a FK — different kinds point at different tables.
+// The route layer validates the referenced row exists on create.
+// Deleted projects / tasks / etc. leave behind stale rows; the list
+// endpoint filters them out on read so users don't see ghosts.
+enum UserPinKind {
+  PROJECT
+  TASK_FOCUS
+  SPRINT_GOAL
+  RELEASE_PROD
+  ACTIVITY
+  TICKET
+}
+
+model UserPin {
+  id        String      @id @default(cuid())
+  userId    String
+  kind      UserPinKind
+  refId     String
+  // Optional free-form notes (e.g. "follow up after demo"). Surfaced
+  // as a small tooltip / detail line in the UI. Kept short by the
+  // route layer (200 chars) so the listing stays compact.
+  note      String?
+  createdAt DateTime    @default(now())
+
+  user User @relation("UserPinsForUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, kind, refId])
+  @@index([userId, kind])
+  @@index([kind, refId])
+}
+
+// NOTE: the former `enum ProjectStatus` was removed here. As of the
+// "custom project statuses" change, Project.status / ChangeRequest.status
+// are free String columns driven by the admin-managed StatusOption table
+// (scope PROJECT) so admins can add their own workflow states. The six
+// built-in keys (TODO, IN_PROGRESS, CLIENT_TEST, BILLING, DONE, ON_HOLD)
+// that carry special code semantics live in lib/projectStatuses.js.
+
+// Project lifecycle is orthogonal to status — status describes the
+// current piece of work, lifecycle describes the project's mode of
+// existence.
+//   PLANNING      first SOW pending, not yet committed
+//   ACTIVE        normal delivery (the default for every legacy row)
+//   MAINTENANCE   never-ending support project; "Close project" is
+//                 hidden, burndown is swapped for a monthly burn-rate
+//                 widget
+//   CLOSED        delivery complete; preserved for reporting
+//   ARCHIVED      hidden from the active list, kept for audit
+enum ProjectLifecycle {
+  PLANNING
+  ACTIVE
+  MAINTENANCE
+  CLOSED
+  ARCHIVED
+}
+
+enum ProjectPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Project {
+  id               String          @id @default(cuid())
+  // Human-friendly code such as "P25-USA-0001". Optional + unique:
+  // legacy rows stay null until the backfill stamps them, and Postgres
+  // treats NULLs as distinct so the unique index permits any number of
+  // unstamped rows. Auto-generated on create after step 2.
+  code             String?         @unique
+  name             String
+  description      String?
+  // Free string (was ProjectStatus enum). Values come from the
+  // admin-managed StatusOption table (scope PROJECT); the six built-in
+  // keys still carry special code semantics. See ProjectStatus enum.
+  status           String          @default("TODO")
+  // Lifecycle is independent of status — see ProjectLifecycle docs.
+  // Legacy rows default to ACTIVE so existing behaviour is preserved
+  // by the prisma db push on boot.
+  lifecycle        ProjectLifecycle @default(ACTIVE)
+  phase            String?
+  startDate        DateTime?
+  endDate          DateTime?
+  country          String?
+  client           String?
+  crmId            String?
+  // FK into the Company → Clients catalogue. When set, the denormalised
+  // client/crmId/country strings are kept in sync on save for exports
+  // and legacy filters that still read the free-text columns.
+  clientId         String?
+  // FK into Application (legacy "product" link). Kept for existing
+  // projects; the project form now uses productId (below) instead.
+  applicationId    String?
+  // FK into the admin-managed Product catalogue (Templates → Products).
+  // This is what the project form picks now, in place of Application.
+  productId        String?
+  // FK into the admin-managed Entity catalogue (Templates → Entities).
+  // Required on shared projects; drives grouping in the time export.
+  entityId         String?
+  // Optional category from the admin-managed list of project types
+  // (templates → project types). Nullable so legacy rows and personal
+  // projects can stay unclassified.
+  projectTypeId    String?
+  priority         ProjectPriority @default(MEDIUM)
+  label            String?
+  // Tailwind palette token used to colour the label chip in the UI.
+  // Optional — null means render with the neutral / outline style.
+  // Legacy: when `labels` JSON is present it takes precedence in the UI.
+  labelColor       String?
+  // Multi-label store: [{ "text": "Urgent", "color": "rose" }, ...]
+  labels           Json?
+  // Legacy column. The manual progress field was removed from the UI
+  // and the create/update zod schema, but the DB column is kept
+  // (matching the original Int @default(0)) so `prisma db push` on
+  // container restart doesn't try to drop a column with existing
+  // data — that requires --accept-data-loss and would crash the
+  // container's boot script. Safe to drop manually with a real
+  // migration once the data is no longer needed.
+  progress         Int             @default(0)
+  ownerId          String
+  reporterId       String?
+  closedAt         DateTime?
+  statusChangedAt  DateTime?
+  statusUpdatedAt  DateTime?
+  // Billing — internal settlement (cost paid between teams / departments)
+  // and the price agreed with the client. Currency defaults to EUR but
+  // each project can override. `*Paid` tracks whether the settlement /
+  // invoice has been paid; `*PaidAt` records when it was paid.
+  internalAmount   Float?
+  internalCurrency String?         @default("EUR")
+  internalPaid     Boolean         @default(false)
+  internalPaidAt   DateTime?
+  clientAmount     Float?
+  clientCurrency   String?         @default("EUR")
+  clientPaid       Boolean         @default(false)
+  clientPaidAt     DateTime?
+  billingNotes     String?
+  // Personal projects belong solely to the creator (`ownerId`). They
+  // never appear in shared lists / search / activities for other users
+  // and never get participants/teams attached. Used as a personal
+  // organiser. Default false to preserve the existing shared-project
+  // behaviour for every legacy row.
+  isPersonal       Boolean         @default(false)
+  // Personal projects can optionally be linked to a regular shared
+  // project the user participates in, to tie personal work back to
+  // the project it relates to. Nullable and separate from `crmId`
+  // (which remains a free-text field for shared projects).
+  linkedProjectId  String?
+  // Soft-delete timestamp. NULL for live projects; non-null means the
+  // project was deleted and can be restored from the Activity log (admins
+  // / holders of project:delete). Mirrors Task.deletedAt — a Prisma client
+  // extension auto-adds `deletedAt: null` to every Project read so deleted
+  // projects don't leak into any list, and the restore endpoint opts out
+  // with an explicit `deletedAt: { not: null }`. Chosen over hard-delete so
+  // the deletion is auditable and reversible (tasks, time, notes survive).
+  deletedAt        DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  owner       User               @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  reporter    User?              @relation("ProjectReporter", fields: [reporterId], references: [id], onDelete: SetNull)
+  projectType ProjectTypeOption? @relation(fields: [projectTypeId], references: [id], onDelete: SetNull)
+  clientRecord Client?           @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  application  Application?      @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  product     Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+  entity      Entity?            @relation(fields: [entityId], references: [id], onDelete: SetNull)
+  // Self-referential: personal project → shared project it is linked to.
+  linkedProject   Project?  @relation("PersonalProjectLink", fields: [linkedProjectId], references: [id], onDelete: SetNull)
+  linkedPersonalProjects Project[] @relation("PersonalProjectLink")
+  tasks       Task[]
+  notes       Note[]
+  files       FileAttachment[]
+  phases      Phase[]
+
+  conversation  Conversation?
+  notifications Notification[]
+  participants  ProjectParticipant[]
+  todos         TodoItem[]
+  activities    ProjectActivity[]
+  events        ActivityEvent[]
+  reassignments TaskReassignment[]
+  teams         ProjectTeam[]
+  contacts      ProjectContact[]
+  timeEntries   TimeEntry[]
+  // Mirror entries on this project that originated from a linked personal project.
+  personalMirrorEntries TimeEntry[] @relation("PersonalProjectMirrors")
+  sprints       Sprint[]
+  // At most one schedule per project — when set, the background
+  // generator keeps `lookahead` PLANNED sprints in front of the
+  // timeline. See SprintSchedule for the semantics.
+  sprintSchedule SprintSchedule?
+  // Change Requests — chargeable additive scope attached to this
+  // project. Cascade-delete: removing a project removes all its CRs
+  // (and via the FK chain, their future tasks once M3 lands).
+  changeRequests ChangeRequest[]
+  groupLinks    ProjectGroupMembership[]
+  tickets       Ticket[]
+  ticketRequestTypes TicketRequestType[] @relation("ProjectTicketRequestTypes")
+
+  @@index([ownerId])
+  @@index([reporterId])
+  @@index([projectTypeId])
+  @@index([linkedProjectId])
+  @@index([clientId])
+  @@index([applicationId])
+  @@index([productId])
+  @@index([entityId])
+  @@index([deletedAt])
+}
+
+// Admin-managed catalogue of Products (Templates → Products). A simple
+// lookup — name + optional code + optional description — that a project
+// picks in place of an Application. Kept deliberately lightweight (no
+// releases / logos / client link); it exists purely so projects can be
+// tagged with the product they relate to.
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  code        String?
+  description String?
+  isActive    Boolean  @default(true)
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projects Project[]
+
+  @@index([isActive])
+}
+
+// Admin-managed billing/accounting Entity (Templates → Entities). Each
+// project is tagged with one so the logged-time export can group hours by
+// entity. Deliberately lightweight: a code + a description.
+model Entity {
+  id          String   @id @default(cuid())
+  code        String
+  description String?
+  isActive    Boolean  @default(true)
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projects Project[]
+
+  @@index([isActive])
+}
+
+// Admin-defined grouping of projects, purely for a cleaner organised
+// view (sidebar + Projects filter). A project can sit in several groups
+// at once; membership doesn't change the project itself.
+model ProjectGroup {
+  id          String   @id @default(cuid())
+  name        String
+  color       String?
+  position    Int      @default(0)
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy User?                    @relation("ProjectGroupCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  members   ProjectGroupMembership[]
+}
+
+// Join row: which projects belong to which group (many-to-many).
+model ProjectGroupMembership {
+  groupId   String
+  projectId String
+  addedAt   DateTime @default(now())
+
+  group   ProjectGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, projectId])
+  @@index([projectId])
+}
+
+// External / important contacts attached to a project — e.g. a client
+// representative, a vendor PM, a stakeholder. NOT system users. Lives
+// inside the project so they're scoped, searchable, and exportable
+// alongside everything else. Anyone with project read access can see
+// the list; admins, managers, and the project owner can edit it.
+model ProjectContact {
+  id          String   @id @default(cuid())
+  projectId   String
+  name        String
+  role        String?
+  company     String?
+  email       String?
+  phone       String?
+  notes       String?
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User?   @relation("ContactCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+}
+
+model ProjectParticipant {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  addedById String?
+  addedAt   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation("ProjectParticipations", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User?   @relation("ProjectParticipantAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, userId])
+  @@index([projectId])
+  @@index([userId])
+}
+
+model Phase {
+  id        String   @id @default(cuid())
+  name      String
+  order     Int      @default(0)
+  color     String?
+  projectId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks      Task[]
+  activities ProjectActivity[]
+  teams      PhaseTeam[]
+
+  @@index([projectId])
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  ON_HOLD
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Task {
+  id           String       @id @default(cuid())
+  // Human-friendly per-project code: "T-0001" for tasks, "ST-0001"
+  // for subtasks. Tasks and subtasks have independent counters per
+  // project. The (projectId, code) compound is unique so a task and
+  // subtask can safely share the same numeric portion of their codes.
+  // Optional: legacy rows stay null until the backfill stamps them.
+  code         String?
+  title        String
+  description  String?
+  status       TaskStatus   @default(TODO)
+  priority     TaskPriority @default(MEDIUM)
+  dueDate      DateTime?
+  projectId    String
+  assigneeId   String?
+  phaseId      String?
+  // Optional Sprint membership (Scrum-style iteration grouping). A task
+  // can sit in the backlog with sprintId = null, get assigned to a
+  // PLANNED or ACTIVE sprint, or be re-assigned via the sprint board's
+  // drag-drop. ON DELETE SET NULL keeps the task alive if its sprint
+  // is removed — the task just drops back into the backlog.
+  sprintId     String?
+  // Per-task time estimate in hours used by sprint capacity / burndown.
+  // Optional so legacy rows stay valid and so non-sprint workflows can
+  // ignore it entirely. Float to allow half-hour granularity.
+  estimateHours Float?
+  // Single-level nesting: subtasks reference a top-level task. The backend
+  // enforces that a parent cannot itself be a subtask, keeping the tree depth
+  // capped at one which matches the UI (Asana / Linear style).
+  parentTaskId String?
+  // Optional Change Request membership. When set, this task is part
+  // of the CR's scope (chargeable additive work). NULL means the
+  // task belongs directly to the original project SOW. Deleting the
+  // CR SETs NULL — the task survives as a project-level task rather
+  // than disappearing with the CR (its history, time entries and
+  // notes are too valuable to drop). To wipe CR tasks along with the
+  // CR, delete them explicitly before deleting the CR.
+  changeRequestId String?
+  // Optional link back to the help-desk ticket this task was created
+  // from (resolver's "Add as Task" action). NULL for ordinary tasks.
+  // ON DELETE SET NULL keeps the task if the ticket is later removed.
+  sourceTicketId String?
+  order        Int          @default(0)
+  // Who originally created this task. Nullable so legacy rows stay
+  // valid; new rows always stamp it. Combined with the
+  // `task:create:any` capability this lets a regular user manage the
+  // tasks THEY created (edit / delete / restore their own work)
+  // without inheriting global task-edit / task-delete rights. The
+  // FK SETs NULL on user delete so the audit info survives even
+  // after the creator's account is removed.
+  createdById  String?
+  // Approval workflow. A "specific" task requires sign-off from an
+  // admin / manager / holder of `task:approve` before it can leave TODO
+  // (locked until approved). `approvedAt` / `approvedById` record the
+  // sign-off. Specific tasks also can't be duplicated.
+  specific     Boolean      @default(false)
+  approvedAt   DateTime?
+  approvedById String?
+  // Disapproval workflow. An approver can reject a specific task with a
+  // required reason instead of approving it. A rejected task stays
+  // visible but locked (approvedAt is still null). The creator can
+  // re-request approval, which clears these fields back to pending;
+  // an approver can also override by approving (which clears them too).
+  rejectedAt      DateTime?
+  rejectedById    String?
+  rejectionReason String?
+  // Soft-delete timestamp. NULL for live rows; non-null means the
+  // task was deleted via the DELETE endpoint and can be restored by
+  // an admin (or any holder of `task:delete:any`) via the Activity
+  // log. We chose soft-delete over hard-delete so that notes, time
+  // entries and reassignment history attached to the task survive
+  // the deletion and reattach automatically when the task is
+  // restored. The Prisma client extension in `lib/prisma.js`
+  // auto-adds `deletedAt: null` to every Task read so deleted rows
+  // don't leak into the regular plan / sprint / search views.
+  deletedAt    DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  project        Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee       User?               @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  phase          Phase?              @relation(fields: [phaseId], references: [id], onDelete: SetNull)
+  sprint         Sprint?             @relation(fields: [sprintId], references: [id], onDelete: SetNull)
+  parent         Task?               @relation("Subtasks", fields: [parentTaskId], references: [id], onDelete: Cascade)
+  subtasks       Task[]              @relation("Subtasks")
+  changeRequest  ChangeRequest?      @relation("ChangeRequestTasks", fields: [changeRequestId], references: [id], onDelete: SetNull)
+  sourceTicket   Ticket?             @relation("TicketTasks", fields: [sourceTicketId], references: [id], onDelete: SetNull)
+  createdBy      User?               @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedBy     User?               @relation("TaskApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  rejectedBy     User?               @relation("TaskRejectedBy", fields: [rejectedById], references: [id], onDelete: SetNull)
+  notes          Note[]
+  reassignments  TaskReassignment[]
+  timeEntries    TimeEntry[]
+  deadlineAlerts TaskDeadlineAlert[]
+  planningSprints PlanningSprintTask[]
+
+  @@unique([projectId, code])
+  @@index([projectId])
+  @@index([assigneeId])
+  @@index([phaseId])
+  @@index([sprintId])
+  @@index([parentTaskId])
+  @@index([changeRequestId])
+  @@index([sourceTicketId])
+  @@index([createdById])
+  @@index([approvedById])
+  @@index([rejectedById])
+  // Used to identify all subtasks that were soft-deleted together
+  // with their parent in a single transaction — the cascade restore
+  // matches them by parent id AND deletedAt timestamp.
+  @@index([deletedAt])
+  // Speeds up the daily "find at-risk tasks" sweep — we filter by
+  // status != DONE and dueDate within a window.
+  @@index([status, dueDate])
+}
+
+// ---------------------------------------------------------------------------
+// Sprints / iterations
+// ---------------------------------------------------------------------------
+// A Sprint is a time-boxed grouping of tasks inside a project — Scrum
+// style. The schema keeps things deliberately minimal:
+//   - status drives the lifecycle (PLANNED -> ACTIVE -> CLOSED, with an
+//     optional reopen back to ACTIVE from CLOSED). The backend enforces
+//     "at most one ACTIVE sprint per project" so plans + burndown stay
+//     unambiguous.
+//   - capacity is stored per (sprint, user) in SprintCapacity. Empty
+//     rows are treated as zero, so the UI can lazily insert rows only
+//     when the user actually sets a number.
+//   - SprintSnapshot is the daily burndown history. A background job
+//     writes one row per ACTIVE sprint per day; the chart just plots
+//     these rows by capturedAt.
+enum SprintStatus {
+  PLANNED
+  ACTIVE
+  CLOSED
+}
+
+model Sprint {
+  id          String       @id @default(cuid())
+  projectId   String
+  name        String
+  // Optional one-line goal the team agrees on at planning time. Shown
+  // in the sprint header + closing dialog so the team can score the
+  // sprint against its stated intent.
+  goal        String?
+  // Inclusive start / exclusive end semantics for the day buckets used
+  // by the burndown chart. Both required so we can size the chart and
+  // detect "should be ACTIVE today" sprints for the snapshot job.
+  startDate   DateTime
+  endDate     DateTime
+  status      SprintStatus @default(PLANNED)
+  startedAt   DateTime?
+  closedAt    DateTime?
+  // Frozen list of top-level taskIds that were attached to this
+  // sprint at close time. Populated by the close handler BEFORE
+  // it re-parents incomplete tasks elsewhere, so the historical
+  // counters / burndown / time-entry inspector can stay accurate
+  // even after the live `sprintId` on those tasks has been
+  // changed (PUSH_TO_NEXT / BACK_TO_BACKLOG). NULL for sprints
+  // that have never been closed; KEEP-strategy closes still
+  // populate it for symmetry.
+  closedTaskIds Json?
+  createdById String
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User              @relation("SprintAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  tasks     Task[]
+  capacity  SprintCapacity[]
+  snapshots SprintSnapshot[]
+
+  // Names are unique per project so the UI / API can address a sprint
+  // by (projectId, name) without ambiguity. Same name in two different
+  // projects is fine.
+  @@unique([projectId, name])
+  @@index([projectId, status])
+  @@index([endDate])
+}
+
+// Per-user planned hours for a sprint. Composite PK keeps the row
+// count low (one row per user actually planned, not one per user in
+// the workspace). Missing rows are treated as zero hours planned.
+model SprintCapacity {
+  sprintId      String
+  userId        String
+  plannedHours  Float    @default(0)
+  updatedAt     DateTime @updatedAt
+
+  sprint Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  user   User   @relation("SprintCapacityUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([sprintId, userId])
+  @@index([userId])
+}
+
+// Cadence for the per-project sprint scheduler. DAILY / WEEKLY /
+// BIWEEKLY / MONTHLY drive how the background job picks the *next*
+// sprint's start/end dates relative to the anchor. We keep MONTHLY a
+// true calendar month (so a March sprint runs Mar 1 → Apr 1, not 30
+// days) because that's how stakeholders actually plan. DAILY is a
+// single calendar day (start of day → start of next day) — useful
+// for short-iteration teams or daily stand-up style buckets.
+enum SprintCadence {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+// Per-project sprint scheduler. When enabled, the background generator
+// keeps `lookahead` PLANNED sprints visible on the timeline at all
+// times — finish a sprint, the next one is already there. Disable to
+// pause auto-generation without losing the settings (so the user can
+// re-enable later with the same cadence/pattern).
+//
+// The schedule never touches sprints that already exist (ACTIVE or
+// CLOSED), and it never moves dates on existing PLANNED sprints; it
+// only appends. To "rebase" you delete the empty PLANNED tail and let
+// the job regenerate.
+model SprintSchedule {
+  id              String        @id @default(cuid())
+  projectId       String        @unique
+  cadence         SprintCadence
+  // Toggle the auto-generator without losing the rest of the config.
+  enabled         Boolean       @default(true)
+  // Anchor for the *first* generated sprint. The generator uses this
+  // verbatim if no sprints exist yet, otherwise it picks up from the
+  // latest existing sprint's endDate so cadence stays in lock-step.
+  anchorDate      DateTime
+  // Sprint length in days. We persist it (instead of deriving from the
+  // cadence) so weekly schedules can override to 5-day work weeks,
+  // biweekly to 10, monthly to 28, etc. Default is 7/14/30 from the
+  // cadence.
+  durationDays    Int           @default(14)
+  // Naming template. Supports {n} (1-based counter), {start} / {end}
+  // (yyyy-mm-dd), {month} (January…), {year}. Default keeps things
+  // simple — most teams use "Sprint 23".
+  namePattern     String        @default("Sprint {n}")
+  // Counter used for the next {n} substitution. Starts at the user's
+  // chosen value and increments after every successful generation, so
+  // numbering is stable even if a sprint is later deleted.
+  nextNumber      Int           @default(1)
+  // How many future PLANNED sprints to keep on the timeline.
+  lookahead       Int           @default(2)
+  // Bookkeeping for the activity feed + audit. updatedById is set by
+  // the API every time the schedule is changed by a user; the
+  // generator job leaves it alone.
+  createdById     String
+  updatedById     String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  // Last time the generator actually appended one or more sprints.
+  // Null until the first successful run. Used by the UI to render a
+  // "next run" hint and by the job to avoid double-firing on the same
+  // hour.
+  lastGeneratedAt DateTime?
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User    @relation("SprintScheduleAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy User?   @relation("SprintScheduleEditor", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([enabled])
+}
+
+// Daily snapshot of a sprint's progress, written by the background
+// "snapshot ACTIVE sprints" job. The burndown chart simply plots
+// remainingHours over capturedAt; everything else is denormalised so
+// the chart endpoint is a single indexed read.
+model SprintSnapshot {
+  id              String   @id @default(cuid())
+  sprintId        String
+  capturedAt      DateTime @default(now())
+  totalTasks      Int      @default(0)
+  completedTasks  Int      @default(0)
+  totalHours      Float    @default(0)
+  remainingHours  Float    @default(0)
+  loggedHours     Float    @default(0)
+
+  sprint Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+
+  @@index([sprintId, capturedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Planning sprints (cross-project, team-scoped)
+// ---------------------------------------------------------------------------
+// A PlanningSprint is a time-boxed planning container that is NOT tied to
+// a single project. Admins / managers curate tasks from ANY project into
+// it so they can plan a period of work for a specific team. It is
+// deliberately separate from the project-scoped `Sprint` model:
+//   - A task keeps its project sprint via `Task.sprintId`; planning-sprint
+//     membership is a separate many-to-many (PlanningSprintTask), so a
+//     task can sit in its project sprint AND one or more planning sprints
+//     at the same time without conflict.
+//   - There is NO "one active per project" rule — many planning sprints
+//     (one per team) can be ACTIVE simultaneously.
+//   - `teamId` is the owning team (null = org-wide). The board's backlog
+//     defaults to that team's members but can pull tasks from anywhere.
+// Reuses the existing SprintStatus enum (PLANNED / ACTIVE / CLOSED).
+model PlanningSprint {
+  id          String       @id @default(cuid())
+  name        String
+  goal        String?
+  startDate   DateTime
+  endDate     DateTime
+  status      SprintStatus @default(PLANNED)
+  // Owning team. SetNull (not Cascade) so deleting a team leaves its
+  // historical planning sprints intact as org-wide rows.
+  teamId      String?
+  startedAt   DateTime?
+  closedAt    DateTime?
+  // Frozen snapshot of taskIds attached at close time, captured BEFORE
+  // the close handler re-parents / detaches incomplete tasks, so
+  // historical reporting stays accurate even after membership changes.
+  closedTaskIds Json?
+  createdById String
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  team      Team?                @relation("TeamPlanningSprints", fields: [teamId], references: [id], onDelete: SetNull)
+  createdBy User                 @relation("PlanningSprintAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  tasks     PlanningSprintTask[]
+  snapshots PlanningSprintSnapshot[]
+  capacity  PlanningSprintCapacity[]
+
+  @@index([teamId, status])
+  @@index([status, endDate])
+}
+
+// Daily burndown snapshot for a planning sprint. Mirrors SprintSnapshot
+// but rolls up the cross-project PlanningSprintTask membership instead
+// of Task.sprintId. Captured by the background scheduler (once per day
+// per ACTIVE planning sprint) and inline on start/close, so the chart
+// always has a baseline + an accurate end-of-sprint row.
+model PlanningSprintSnapshot {
+  id               String   @id @default(cuid())
+  planningSprintId String
+  capturedAt       DateTime @default(now())
+  totalTasks       Int      @default(0)
+  completedTasks   Int      @default(0)
+  totalHours       Float    @default(0)
+  remainingHours   Float    @default(0)
+  loggedHours      Float    @default(0)
+
+  planningSprint PlanningSprint @relation(fields: [planningSprintId], references: [id], onDelete: Cascade)
+
+  @@index([planningSprintId, capturedAt])
+}
+
+// Per-user planned hours for a planning sprint — mirror of
+// SprintCapacity for the cross-project board's capacity heatmap.
+model PlanningSprintCapacity {
+  planningSprintId String
+  userId           String
+  plannedHours     Float    @default(0)
+  updatedAt        DateTime @updatedAt
+
+  planningSprint PlanningSprint @relation(fields: [planningSprintId], references: [id], onDelete: Cascade)
+  user           User           @relation("PlanningSprintCapacityUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([planningSprintId, userId])
+  @@index([userId])
+}
+
+// Join row: which tasks are committed to a planning sprint. Separate
+// from Task.sprintId so cross-project planning never disturbs the
+// project-level sprint board. Composite uniqueness prevents the same
+// task being added twice.
+model PlanningSprintTask {
+  id               String   @id @default(cuid())
+  planningSprintId String
+  taskId           String
+  addedById        String?
+  addedAt          DateTime @default(now())
+
+  planningSprint PlanningSprint @relation(fields: [planningSprintId], references: [id], onDelete: Cascade)
+  task           Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  addedBy        User?          @relation("PlanningSprintTaskAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@unique([planningSprintId, taskId])
+  @@index([taskId])
+}
+
+// Auto-generator config for planning sprints, keyed by team (one
+// schedule per team; teamId = null means an org-wide schedule). Mirrors
+// SprintSchedule but for the cross-project PlanningSprint timeline. The
+// background runner keeps `lookahead` future PLANNED planning sprints in
+// front of "now" for each enabled schedule. This is the piece that
+// supports recurring (e.g. DAILY) team planning sessions.
+//
+// Note: teamId is nullable + unique. Postgres treats NULLs as distinct
+// in a unique index, so the org-wide (null) case is additionally guarded
+// at the application layer (one org-wide schedule max).
+model PlanningSprintSchedule {
+  id              String        @id @default(cuid())
+  teamId          String?       @unique
+  cadence         SprintCadence
+  enabled         Boolean       @default(true)
+  anchorDate      DateTime
+  durationDays    Int           @default(1)
+  // Naming template — same tokens as SprintSchedule: {n}, {start},
+  // {end}, {month}, {year}. Default leans on the date since daily
+  // planning sprints are most naturally named by their day.
+  namePattern     String        @default("Planning {start}")
+  // Optional goal stamped onto every generated planning sprint.
+  goal            String?
+  nextNumber      Int           @default(1)
+  lookahead       Int           @default(2)
+  createdById     String
+  updatedById     String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  lastGeneratedAt DateTime?
+
+  team      Team? @relation("TeamPlanningSchedules", fields: [teamId], references: [id], onDelete: Cascade)
+  createdBy User  @relation("PlanningScheduleAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy User? @relation("PlanningScheduleEditor", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([enabled])
+}
+
+// Per-(task × recipient × window) record so the daily deadline sweep
+// only emits one notification when a task crosses each threshold.
+// `windowDays` is the bucket the alert fell into when it fired
+// (3 = "less than 3 days", 0 = "overdue", etc.) — if the deadline
+// moves and we cross a tighter bucket later, we'll fire a fresh alert
+// because (task, user, window) becomes a new key.
+model TaskDeadlineAlert {
+  id         String   @id @default(cuid())
+  taskId     String
+  userId     String
+  // Which threshold triggered the alert. Lets us re-alert if the task
+  // moves from "<3 days" to "overdue" without re-firing the original.
+  windowDays Int
+  sentAt     DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, userId, windowDays])
+  @@index([userId, sentAt])
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  content   String
+  projectId String
+  // Optional task pin: when set, the note is "about" a specific task or
+  // subtask within the project. Cascade is SetNull so deleting the task
+  // doesn't wipe the note history; it just becomes a project-wide note.
+  taskId    String?
+  // Optional Change Request pin (M4 of the CR workstream). When set,
+  // the note is "about" a CR within the project. SetNull on CR delete
+  // mirrors taskId — note history outlives the CR and falls back to
+  // being a project-wide note. A note can also be both task-pinned and
+  // CR-pinned at once: that's the natural shape for a note someone
+  // wrote on a CR-scoped task. The CR-detail "Notes" tab also includes
+  // notes pinned to that CR's tasks (via the task → CR relation) so it
+  // surfaces a complete "everything notes-shaped about this CR" view
+  // without forcing callers to set changeRequestId on every task note.
+  changeRequestId String?
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project       Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task          Task?          @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  changeRequest ChangeRequest? @relation("ChangeRequestNotes", fields: [changeRequestId], references: [id], onDelete: SetNull)
+  author        User           @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  files         FileAttachment[]
+
+  @@index([projectId])
+  @@index([taskId])
+  @@index([changeRequestId])
+  @@index([authorId])
+}
+
+enum TodoPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model TodoItem {
+  id        String       @id @default(cuid())
+  userId    String
+  title     String
+  notes     String?
+  dueDate   DateTime?
+  done      Boolean      @default(false)
+  doneAt    DateTime?
+  projectId String?
+  priority  TodoPriority @default(MEDIUM)
+  // Order is descending: higher position == higher up the list. Lets us
+  // insert new items at the top by setting position = max + 1 without
+  // re-numbering siblings.
+  position  Int          @default(0)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, done, position])
+  @@index([userId, dueDate])
+  @@index([projectId])
+}
+
+model FileAttachment {
+  id           String   @id @default(cuid())
+  filename     String
+  originalName String
+  mimeType     String
+  size         Int
+  url          String
+  projectId    String?
+  uploaderId   String
+  // Optional pin to a specific note. When the source note is deleted we
+  // keep the file so it stays in the project's Files panel; we just
+  // null out the pin via SetNull.
+  noteId       String?
+  // Optional pin to a Change Request (M5 of the CR workstream). When set,
+  // the file shows up in the CR's Files tab alongside files attached to
+  // any CR-scoped note (which surface via the note → CR relation). Same
+  // SetNull cascade as noteId — note/CR delete leaves the file alive in
+  // the project's Files panel so we never lose user-uploaded content.
+  changeRequestId String?
+  createdAt    DateTime @default(now())
+
+  project       Project?       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  uploader      User           @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  note          Note?          @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  changeRequest ChangeRequest? @relation("ChangeRequestFiles", fields: [changeRequestId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([uploaderId])
+  @@index([noteId])
+  @@index([changeRequestId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum ConversationType {
+  DM
+  PROJECT
+}
+
+model Conversation {
+  id        String           @id @default(cuid())
+  type      ConversationType @default(DM)
+  // For PROJECT conversations: the project this room belongs to (1:1).
+  projectId String?          @unique
+  // For DM conversations: deterministic key built from sorted user IDs
+  // ("<lowerId>:<higherId>") so we can find-or-create idempotently.
+  dmKey     String?          @unique
+  title     String?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  project      Project?                  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  participants ConversationParticipant[]
+  messages     Message[]
+}
+
+model ConversationParticipant {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         String
+  joinedAt       DateTime @default(now())
+  // When the user last opened / read this conversation. Compared against
+  // message.createdAt to compute unread counts.
+  lastReadAt     DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  senderId       String
+  // Optional now — a message can be an attachment-only message ("Marko
+  // sent a file"). We keep an empty string when there's no body so the
+  // text column never goes NULL (cheaper indexes).
+  content        String   @default("")
+  createdAt      DateTime @default(now())
+
+  conversation Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User                @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  attachments  MessageAttachment[]
+
+  @@index([conversationId, createdAt])
+}
+
+// Files attached to a chat message. Stored on disk just like the
+// project file uploads, but with a hard expiry — attachments are
+// auto-deleted 30 days after they were uploaded so the chat doesn't
+// turn into long-term file storage. Downloads after expiry return
+// 410 Gone; the row itself is removed by the cleanup job that runs
+// daily.
+model MessageAttachment {
+  id           String   @id @default(cuid())
+  messageId    String
+  fileUrl      String
+  fileName     String
+  fileSize     Int
+  fileMimeType String
+  // Hard expiry. Set by the upload handler to now + 30 days; the
+  // cleanup job tears down both the disk file and the row when this
+  // timestamp passes.
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([messageId])
+}
+
+enum NotificationType {
+  PROJECT_CREATED
+  PROJECT_UPDATED
+  PROJECT_STATUS_CHANGED
+  PROJECT_OWNER_CHANGED
+  PROJECT_DELETED
+  PROJECT_RESTORED
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_ASSIGNED
+  TASK_STATUS_CHANGED
+  TASK_DUE_DATE_CHANGED
+  TASK_DELETED
+  TASK_RESTORED
+  NOTE_ADDED
+  NOTE_UPDATED
+  NOTE_DELETED
+  FILE_UPLOADED
+  MENTION
+  MESSAGE_RECEIVED
+  USER_PENDING_APPROVAL
+  USER_APPROVED
+  TASK_REASSIGN_PROPOSED
+  TASK_REASSIGN_APPROVED
+  TASK_REASSIGN_REJECTED
+  // Fired by the daily deadline sweep when a task is within the
+  // configured alert window (default: <3 days from due). Sent to each
+  // assignee + project owner / reporter, then deduped so the same
+  // (task × window × recipient) doesn't spam the bell on every run.
+  TASK_DUE_SOON
+  // A new ticket was opened — sent to all agents so the queue is seen.
+  TICKET_CREATED
+  // A new comment/reply was posted on a ticket (sent to the requester
+  // for agent replies, to agents for requester replies / internal notes).
+  TICKET_COMMENT
+  // A ticket was taken / (re)assigned — sent to the requester ("X is now
+  // handling your request") and to the newly assigned agent.
+  TICKET_ASSIGNED
+  // Reminder to a `timeLogMandatory` user who is below the TimeLogPolicy
+  // target for the current period ("Please fill your working log").
+  TIME_LOG_REMINDER
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String?
+  link      String?
+  projectId String?
+  actorId   String?
+  meta      Json?
+  read      Boolean          @default(false)
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  user    User     @relation("UserNotifications", fields: [userId], references: [id], onDelete: Cascade)
+  actor   User?    @relation("ActorNotifications", fields: [actorId], references: [id], onDelete: SetNull)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([userId, read, createdAt])
+  @@index([userId, createdAt])
+}
+
+// Expo push notification tokens — one row per device per user. The
+// Expo push token uniquely identifies an installed app instance; we
+// fan out push messages to every token a user has registered.
+model PushToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  platform  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Admin-defined library of phase names that can be picked from a dropdown
+// when creating a phase on any project. Active templates are also seeded
+// onto brand-new projects automatically.
+model PhaseTemplate {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  // Admin-picked palette token for this template. When set, every
+  // brand-new phase seeded from this template inherits the colour,
+  // overriding the auto-assigned hash-derived palette slot. Stored
+  // as a short token (e.g. "sky", "emerald") rather than a full
+  // class string so the FE can compose `bg-${token}-200` etc. and
+  // a future palette tweak doesn't require touching persisted rows.
+  // Optional — when null the FE falls back to the auto-assigned
+  // colour, matching the pre-feature behaviour for legacy rows.
+  color     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+// Admin-defined catalog of country names that show up in the project
+// dropdown. Keeping the model dead-simple (name + order + isActive)
+// because the actual project still stores country as a String — these
+// rows just feed the picker, they don't constrain the column.
+model CountryOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+// Same shape as CountryOption — admin-defined catalog of client names.
+model ClientOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+// Admin-curated catalogue of "project types" (e.g. Internal,
+// Consulting, R&D, Maintenance). Surfaced as a dropdown on the project
+// form and joined into time-tracking exports.
+model ProjectTypeOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  // When true, projects of this type hide the "Mark complete"
+  // affordance (ongoing maintenance / support engagements).
+  hideMarkComplete Boolean @default(false)
+  // Optional accounting/activity code for this project type, surfaced in
+  // the logged-time export so each row carries the type's code.
+  activityCode String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects Project[]
+
+  @@index([order])
+}
+
+// Company clients — full CRM-style records used when creating projects.
+model Client {
+  id         String   @id @default(cuid())
+  name       String
+  crmId      String?
+  address    String?
+  city       String?
+  postalCode String?
+  country    String?
+  phone      String?
+  email      String?
+  website    String?
+  notes      String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  contacts ClientContact[]
+  projects Project[]
+  tickets  Ticket[] @relation("ClientTickets")
+  users    User[]   @relation("ClientUsers")
+  // Which ticket request types this client's external users may raise.
+  // Empty = none (strict): such users see no type cards until granted.
+  allowedTicketTypes ClientTicketType[]
+
+  @@index([name])
+  @@index([crmId])
+}
+
+// Join: a client's external users may only raise these ticket request
+// types on the portal. Absence of any rows for a client = no types.
+model ClientTicketType {
+  clientId      String
+  requestTypeId String
+  client        Client            @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  requestType   TicketRequestType @relation(fields: [requestTypeId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, requestTypeId])
+  @@index([requestTypeId])
+}
+
+// Main / secondary contacts for a client record.
+model ClientContact {
+  id        String   @id @default(cuid())
+  clientId  String
+  name      String
+  email     String?
+  phone     String?
+  role      String?
+  isPrimary Boolean  @default(false)
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+}
+
+// Admin-managed catalog of business units / org departments. Users
+// pick from this list on their profile page; admins curate the list
+// from the Templates page. Pattern mirrors CountryOption /
+// ProjectTypeOption.
+model BusinessUnitOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users User[]
+
+  @@index([order])
+}
+
+// Admin-defined priority labels and colors. Existing data still uses the
+// TaskPriority/ProjectPriority enums; rows here only customise how each
+// enum value is *displayed* (label, color, order) and whether it is
+// available in the dropdowns.
+//   scope: 'TASK' or 'PROJECT' so admins can configure them separately
+//   key:   the enum value ('LOW', 'MEDIUM', 'HIGH', 'URGENT', ...)
+//   color: a Tailwind-friendly token used by the frontend badge ('rose'
+//          / 'amber' / 'emerald' / 'sky' / 'slate' / 'violet')
+model PriorityOption {
+  id        String   @id @default(cuid())
+  scope     String
+  key       String
+  label     String
+  color     String   @default("slate")
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([scope, key])
+  @@index([scope, order])
+}
+
+// Admin-defined status labels and colors. Same shape as PriorityOption.
+// Existing data still uses the underlying ProjectStatus enum so all the
+// code that asks "is this DONE?" / "is this ON_HOLD?" keeps working —
+// this row set only customises how each enum value is *displayed*.
+//   scope: 'PROJECT' today; reserved for 'TASK' / 'CR' if we ever lift
+//          the enums there too
+//   key:   the enum value ('TODO', 'IN_PROGRESS', 'CLIENT_TEST',
+//          'BILLING', 'DONE', 'ON_HOLD')
+//   label: free-form display name ("Backlog", "In review", ...)
+//   color: Tailwind-friendly token same as PriorityOption.color
+//   isActive: hide a status from the create/edit dropdown without
+//             deleting historical rows that still reference it
+//
+// CRs (M2) share the PROJECT scope — by design admins maintain a single
+// status pipeline that applies to both. If a use case for divergent
+// statuses ever appears, add a 'CR' scope without touching this model.
+model StatusOption {
+  id        String   @id @default(cuid())
+  scope     String
+  key       String
+  label     String
+  color     String   @default("slate")
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([scope, key])
+  @@index([scope, order])
+}
+
+// Change Request — a chargeable child of a Project. Each CR has its
+// own money + status + (in M3) its own scoped tasks/notes. Lives
+// behind capability flags (cr:create / cr:edit / cr:delete) — there is
+// no formal approval workflow because in the user's domain a CR comes
+// from the client and the moment a manager creates it in the system
+// it's effectively the agreement.
+//
+// Status reuses the ProjectStatus enum (and therefore the same
+// admin-managed StatusOption pipeline) by design — admins maintain one
+// pipeline that applies to both surfaces.
+//
+// Money fields mirror Project's (internal vs client), but currency is
+// NOT stored here — it inherits from the parent project at query time
+// so we never get a CR billed in a different currency than its
+// project. Same for the 'paid' flags (we still store the timestamp).
+//
+// Code shape: <PROJECT_CODE>-CR-001 — see lib/codes.js's CR helper.
+model ChangeRequest {
+  id              String        @id @default(cuid())
+  // Human-friendly code, e.g. "P25-USA-0001-CR-001". Unique globally
+  // so it can be referenced from notes / search without a project
+  // hint. Auto-stamped on create. Optional + unique to mirror the
+  // pattern used by Project/Task codes (NULLs are distinct under the
+  // unique index, so legacy rows during backfill stay valid).
+  code            String?       @unique
+  projectId       String
+  title           String
+  description     String?
+  // Free string (was ProjectStatus enum) — shares the admin-managed
+  // StatusOption PROJECT pipeline with Project.status.
+  status          String        @default("TODO")
+  internalAmount  Float?
+  internalPaid    Boolean       @default(false)
+  internalPaidAt  DateTime?
+  clientAmount    Float?
+  clientPaid      Boolean       @default(false)
+  clientPaidAt    DateTime?
+  estimatedHours  Float?
+  createdById     String
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User    @relation("ChangeRequestCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  // Tasks scoped to this CR (M3). Note: when the CR is deleted, the
+  // tasks survive (Task.onDelete = SetNull) — they drop back to
+  // project-level scope so history isn't lost.
+  tasks Task[] @relation("ChangeRequestTasks")
+
+  // Notes pinned directly to this CR (M4). The CR-detail Notes tab
+  // also surfaces notes pinned to this CR's tasks, but those come in
+  // via the Task relation rather than this back-relation. SetNull on
+  // CR delete keeps note history alive.
+  notes Note[] @relation("ChangeRequestNotes")
+
+  // Files pinned directly to this CR (M5). The CR-detail Files tab
+  // also surfaces files attached to this CR's notes (via the note →
+  // CR relation), so this back-relation only covers the direct pin.
+  // SetNull on CR delete keeps file history alive.
+  files FileAttachment[] @relation("ChangeRequestFiles")
+
+  @@index([projectId])
+  @@index([createdById])
+  @@index([status])
+}
+
+// Plan-level activities live alongside tasks under each phase. They
+// represent meetings, calls, reminders, comments, document drops, etc.
+// — anything that's an event in the project's life rather than a unit
+// of work to ship. Distinct from Task to keep the scheduling /
+// reporting semantics simple (no priority, no subtasks, no statuses
+// beyond done/not-done).
+enum ActivityKind {
+  CALL
+  MEETING
+  REMINDER
+  COMMENT
+  DOCUMENT
+  OTHER
+}
+
+model ProjectActivity {
+  id          String       @id @default(cuid())
+  projectId   String
+  phaseId     String?
+  kind        ActivityKind @default(MEETING)
+  title       String
+  details     String?
+  scheduledAt DateTime?
+  done        Boolean      @default(false)
+  doneAt      DateTime?
+  assigneeId  String?
+  createdById String?
+  order       Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  phase     Phase?  @relation(fields: [phaseId], references: [id], onDelete: SetNull)
+  assignee  User?   @relation("ProjectActivityAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  createdBy User?   @relation("ProjectActivityCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  events ActivityEvent[] @relation("ActivityEventActivity")
+
+  @@index([projectId])
+  @@index([phaseId])
+  @@index([assigneeId])
+}
+
+// Append-only audit log of "things that happened" in the project that
+// we want to surface in the Activities feed (e.g. a task being marked
+// Done or reopened, a personal to-do flipped, an activity created or
+// completed). We keep this as its own table — instead of relying on
+// Notification rows — so the entry survives even when nobody else gets
+// notified (e.g. lone-participant project) and so we don't have to
+// dedupe per-recipient fan-out.
+enum ActivityEventType {
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_ASSIGNEE_CHANGED
+  TASK_DUE_DATE_CHANGED
+  TASK_DELETED
+  TASK_RESTORED
+  TASK_APPROVED
+  TASK_DISAPPROVED
+  TASK_APPROVAL_REQUESTED
+  PROJECT_DELETED
+  PROJECT_RESTORED
+  TASK_STATUS_CHANGED
+  TASK_PHASE_CHANGED
+  TODO_STATUS_CHANGED
+  NOTE_ADDED
+  NOTE_UPDATED
+  NOTE_DELETED
+  PROJECT_ACTIVITY_CREATED
+  PROJECT_ACTIVITY_COMPLETED
+  PROJECT_ACTIVITY_REOPENED
+  PROJECT_PHASE_CHANGED
+  PROJECT_VIEWED
+  PROJECT_STATUS_CHANGED
+  PROJECT_OWNER_CHANGED
+  PROJECT_DETAILS_UPDATED
+  PROJECT_BILLING_CHANGED
+  PROJECT_PAYMENT_CHANGED
+  // User / account audit events. The actor is the person performing
+  // the action; for events that target another user (admin editing a
+  // member, etc.) we stash `targetUserId` and `targetUserName` in the
+  // `meta` payload so the feed can render naturally.
+  USER_REGISTERED
+  USER_LOGIN
+  USER_CREATED
+  USER_DELETED
+  USER_PROFILE_UPDATED
+  USER_AVATAR_UPDATED
+  USER_AVATAR_REMOVED
+  USER_PASSWORD_CHANGED
+  USER_ROLE_CHANGED
+  // Per-user capability overrides toggled by an admin. `meta.before`
+  // and `meta.after` carry the full key arrays for the audit reader.
+  USER_CAPABILITIES_CHANGED
+  USER_APPROVED
+  USER_SUSPENDED
+  USER_REACTIVATED
+  // Task reassignment workflow.
+  TASK_REASSIGN_PROPOSED
+  TASK_REASSIGN_APPROVED
+  TASK_REASSIGN_REJECTED
+  TASK_REASSIGN_CANCELLED
+  // Teams.
+  TEAM_CREATED
+  TEAM_UPDATED
+  TEAM_DELETED
+  TEAM_MEMBER_ADDED
+  TEAM_MEMBER_REMOVED
+  PROJECT_TEAM_ADDED
+  PROJECT_TEAM_REMOVED
+  PHASE_TEAM_ADDED
+  PHASE_TEAM_REMOVED
+  // External / important contacts (non-system users) attached to a
+  // project — meta.contactId points back to the ProjectContact row.
+  PROJECT_CONTACT_ADDED
+  PROJECT_CONTACT_UPDATED
+  PROJECT_CONTACT_REMOVED
+  // Time tracking. _TRACKED is emitted when a live timer is stopped
+  // (the user actually worked through it); _MANUAL_ADDED is emitted
+  // when an entry is logged after the fact via the /time page. Both
+  // include `meta.durationSeconds`, `meta.entryId` and (when set)
+  // `meta.taskTitle` / `meta.taskCode` so the feed can describe the
+  // event without re-fetching the entry.
+  TIME_ENTRY_TRACKED
+  TIME_ENTRY_MANUAL_ADDED
+  // Change requests. meta carries crId, crCode, crTitle, projectId.
+  // STATUS_CHANGED additionally stores meta.fromStatus / meta.toStatus
+  // so the feed can render "moved from In progress to Client test"
+  // without re-fetching.
+  CR_CREATED
+  CR_UPDATED
+  CR_DELETED
+  CR_STATUS_CHANGED
+  // Applications & releases. meta carries appId/appName + (for release
+  // events) releaseId/releaseVersion. PHASE_DECLARED also stores
+  // meta.fromPhase / meta.toPhase. CHECKPOINT_ADDED stores
+  // meta.checkpointId, meta.kind and (optionally) meta.environment.
+  APP_CREATED
+  APP_UPDATED
+  APP_DELETED
+  APP_RELEASE_CREATED
+  APP_RELEASE_UPDATED
+  APP_RELEASE_DELETED
+  APP_RELEASE_PHASE_DECLARED
+  APP_CHECKPOINT_ADDED
+  APP_CHECKPOINT_DELETED
+  // Sprints / iterations. meta carries sprintId/sprintName and (where
+  // relevant) startDate/endDate, taskId/taskTitle/taskCode for the
+  // task-add/remove events, and the close strategy
+  // (PUSH_TO_NEXT|BACK_TO_BACKLOG|KEEP) for SPRINT_CLOSED.
+  SPRINT_CREATED
+  SPRINT_UPDATED
+  SPRINT_STARTED
+  SPRINT_CLOSED
+  SPRINT_REOPENED
+  SPRINT_DELETED
+  // Bulk-delete is logged once for the whole batch (instead of N
+  // individual SPRINT_DELETED rows) so the activity feed stays
+  // readable when a user trims 50+ sprints at once. meta carries
+  // { deleted, tasksDetached, sprints: [{ sprintId, sprintName,
+  // status }, …] }.
+  SPRINT_BULK_DELETED
+  TASK_ADDED_TO_SPRINT
+  TASK_REMOVED_FROM_SPRINT
+  // Sprint scheduler — meta carries cadence/durationDays/lookahead/
+  // namePattern/anchorDate so the activity feed can render a useful
+  // "weekly, lookahead 2, next sprint May 30" sentence. AUTO_RUN is
+  // emitted by the background generator with meta.generated = [names].
+  SPRINT_SCHEDULE_UPDATED
+  SPRINT_SCHEDULE_DISABLED
+  SPRINT_SCHEDULE_AUTO_RUN
+  // Planning sprints (cross-project, team-scoped). meta carries
+  // planningSprintId/planningSprintName, teamId/teamName, startDate/
+  // endDate, and for task add/remove taskId/taskTitle/taskCode +
+  // projectId/projectName. PLANNING_SPRINT_CLOSED stores the close
+  // strategy (PUSH_TO_NEXT|BACK_TO_BACKLOG|KEEP).
+  PLANNING_SPRINT_CREATED
+  PLANNING_SPRINT_UPDATED
+  PLANNING_SPRINT_STARTED
+  PLANNING_SPRINT_CLOSED
+  PLANNING_SPRINT_DELETED
+  TASK_ADDED_TO_PLANNING_SPRINT
+  TASK_REMOVED_FROM_PLANNING_SPRINT
+  // Planning sprint scheduler. meta carries scheduleId, teamId/teamName,
+  // cadence, anchorDate, lookahead, namePattern; AUTO_RUN adds
+  // meta.generated = [{ planningSprintId, name, startDate, endDate }].
+  PLANNING_SPRINT_SCHEDULE_UPDATED
+  PLANNING_SPRINT_SCHEDULE_DISABLED
+  PLANNING_SPRINT_SCHEDULE_AUTO_RUN
+  // Ticketing (help-desk module). meta carries ticketId, ticketCode,
+  // ticketSubject and (where set) ticketCategory; projectId column holds
+  // the ticket's project. STATUS_CHANGED adds meta.fromStatus/
+  // meta.toStatus; ASSIGNED adds meta.assigneeId/meta.assigneeName (null
+  // assignee = unassigned/released back to the queue).
+  TICKET_CREATED
+  TICKET_STATUS_CHANGED
+  TICKET_ASSIGNED
+  TICKET_DELETED
+  TICKET_RESTORED
+  // Broadcast announcements (admin). meta carries announcementId,
+  // title, type, audience; ACKNOWLEDGED adds meta.comment when the
+  // user left a written response.
+  ANNOUNCEMENT_CREATED
+  ANNOUNCEMENT_ACTIVATED
+  ANNOUNCEMENT_DEACTIVATED
+  ANNOUNCEMENT_DELETED
+  ANNOUNCEMENT_ACKNOWLEDGED
+}
+
+model ActivityEvent {
+  id         String            @id @default(cuid())
+  type       ActivityEventType
+  actorId    String?
+  projectId  String?
+  taskId     String?
+  todoId     String?
+  activityId String?
+  fromValue  String?
+  toValue    String?
+  message    String?
+  meta       Json?
+  createdAt  DateTime          @default(now())
+
+  actor    User?            @relation("ActivityEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  project  Project?         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  activity ProjectActivity? @relation("ActivityEventActivity", fields: [activityId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([type, createdAt])
+}
+
+// Reassignment proposals: any participant of a project (typically the
+// current assignee, but anyone with access can speak up if they know
+// the assignee is unavailable) suggests handing a task off to someone
+// else. Admins / managers approve or reject. Approving updates the
+// task's `assigneeId`. Approving requires a concrete `toAssigneeId`
+// (the request can stay open with a null toAssignee while the
+// reviewer decides who to give it to).
+enum ReassignmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model TaskReassignment {
+  id             String             @id @default(cuid())
+  taskId         String
+  // Denormalised so we can list "all pending requests in projects I
+  // can review" without an extra join through Task -> Project.
+  projectId      String
+  proposerId     String
+  // Snapshot of the assignee at the moment of proposal — the actual
+  // task may change again before the request is decided. Null when
+  // the task was unassigned.
+  fromAssigneeId String?
+  // Suggested target. Null is allowed so the proposer can ask "please
+  // reassign me, I don't know to whom" and let a manager decide.
+  toAssigneeId   String?
+  reason         String
+  status         ReassignmentStatus @default(PENDING)
+  decidedById    String?
+  decidedAt      DateTime?
+  decisionNote   String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  task         Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  project      Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  proposer     User    @relation("ReassignmentProposer", fields: [proposerId], references: [id], onDelete: Cascade)
+  fromAssignee User?   @relation("ReassignmentFrom", fields: [fromAssigneeId], references: [id], onDelete: SetNull)
+  toAssignee   User?   @relation("ReassignmentTo", fields: [toAssigneeId], references: [id], onDelete: SetNull)
+  decidedBy    User?   @relation("ReassignmentDecidedBy", fields: [decidedById], references: [id], onDelete: SetNull)
+
+  @@index([projectId, status, createdAt])
+  @@index([taskId, status])
+  @@index([proposerId, createdAt])
+}
+
+// Admin/Manager-curated bundles of users that can be added to a
+// project (or a single phase) in one click. Adding a team to a
+// project upserts a ProjectParticipant row for every member; adding
+// a team to a phase records the ownership and also seeds project
+// participation. Removing the team does NOT remove the participants
+// — they may have been added individually too — but it does drop
+// the visible team chip.
+model Team {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  // Tailwind palette token used for the team chip in the UI. Same
+  // shape as PriorityOption.color (rose / amber / emerald / sky /
+  // slate / violet / ...).
+  color       String?
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy User?         @relation("TeamCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  members   TeamMember[]
+  projects  ProjectTeam[]
+  phases    PhaseTeam[]
+  planningSprints PlanningSprint[] @relation("TeamPlanningSprints")
+  planningSchedules PlanningSprintSchedule[] @relation("TeamPlanningSchedules")
+  tickets         Ticket[]                 @relation("TeamTickets")
+
+  @@index([name])
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  userId    String
+  addedById String?
+  addedAt   DateTime @default(now())
+
+  team    Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user    User  @relation("TeamMembership", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User? @relation("TeamMemberAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}
+
+model ProjectTeam {
+  id        String   @id @default(cuid())
+  projectId String
+  teamId    String
+  addedById String?
+  addedAt   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  team    Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  addedBy User?   @relation("ProjectTeamAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, teamId])
+  @@index([teamId])
+}
+
+model PhaseTeam {
+  id        String   @id @default(cuid())
+  phaseId   String
+  teamId    String
+  addedById String?
+  addedAt   DateTime @default(now())
+
+  phase   Phase @relation(fields: [phaseId], references: [id], onDelete: Cascade)
+  team    Team  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  addedBy User? @relation("PhaseTeamAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@unique([phaseId, teamId])
+  @@index([teamId])
+}
+
+// Time tracking. Each TimeEntry is one block of time a user spent on
+// a project (and optionally on a specific task within that project).
+//
+// Roll-up: `projectId` is ALWAYS set, even when `taskId` is set. The
+// API derives `projectId` from the task on create so the two can
+// never disagree, and project-level totals stay a single-table query.
+//
+// Live timer:
+//   - `endedAt = null` and `source = TIMER` ⇒ this is the user's
+//     currently-running timer. We enforce one running timer per user
+//     at the application layer (any new start auto-stops the old).
+//   - On stop, `endedAt` is set and `durationSeconds` is computed.
+//
+// Manual entry:
+//   - `source = MANUAL`, both `startedAt` and `endedAt` provided up
+//     front, `durationSeconds` derived on insert / update.
+enum TimeEntrySource {
+  TIMER
+  MANUAL
+}
+
+model TimeEntry {
+  id              String          @id @default(cuid())
+  userId          String
+  projectId       String
+  taskId          String?
+  startedAt       DateTime
+  endedAt         DateTime?
+  // Cached duration in seconds. 0 while a timer is still running;
+  // recomputed on stop / manual edit. Letting the DB store the
+  // pre-computed value keeps "total time" queries trivial.
+  durationSeconds Int             @default(0)
+  description     String?
+  // Set only when a user logs time on a task assigned to SOMEONE ELSE
+  // (helping / participating / covering …). `crossUserReason` is a
+  // category key, `crossUserNote` an optional free-text explanation.
+  // Null for own-task and project-level entries.
+  crossUserReason String?
+  crossUserNote   String?
+  source          TimeEntrySource @default(TIMER)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Personal-project mirror support.
+  // When a user logs time on a personal project that has a `linkedProjectId`,
+  // a second "mirror" entry is automatically created on the linked project so
+  // that project managers see the contribution there.
+  // On the mirror entry:  fromPersonalProjectId holds the originating personal
+  // project's id, and sourceEntryId holds the original entry's id.
+  // On the source entry:  both fields are NULL.
+  fromPersonalProjectId String?
+  sourceEntryId         String?  @unique
+
+  user    User    @relation("TimeEntryUser", fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task    Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  fromPersonalProject Project? @relation("PersonalProjectMirrors", fields: [fromPersonalProjectId], references: [id], onDelete: SetNull)
+  // Self-relation that lets us follow a mirror back to its origin
+  // entry so the export / admin "All users" view can surface the
+  // personal task title + note that the user originally logged on.
+  // Mirror -> source via `sourceEntry`; source -> mirror via
+  // `mirroredAs` (1:1 because sourceEntryId is unique).
+  // SetNull on delete keeps the mirror row alive if the source ever
+  // disappears in an inconsistent state — the UI just stops showing
+  // the personal-side details for it.
+  sourceEntry TimeEntry?  @relation("TimeEntryMirror", fields: [sourceEntryId], references: [id], onDelete: SetNull)
+  mirroredAs  TimeEntry?  @relation("TimeEntryMirror")
+
+  // Fast lookup of the running timer for a user (`endedAt IS NULL`).
+  @@index([userId, endedAt])
+  // Project-scoped queries (totals, contributor leaderboards).
+  @@index([projectId, startedAt])
+  // Task-scoped queries (per-task time on the project page).
+  @@index([taskId, startedAt])
+  @@index([fromPersonalProjectId])
+}
+
+// ============================================================================
+// Time-log compliance policy (singleton)
+// ----------------------------------------------------------------------------
+// One admin-managed row (id = "singleton"). Over the fixed window
+// [startDate, endDate], every user flagged `timeLogMandatory` must have at
+// least `requiredDays` distinct days that each reach `minHoursPerDay` hours
+// of logged time. If they're short they get a daily in-app reminder
+// ("Please fill your working log") and, when `notify` is on, a bell
+// notification too. `enabled` gates the whole feature.
+model TimeLogPolicy {
+  id             String    @id @default("singleton")
+  enabled        Boolean   @default(false)
+  // Recurring monthly model: `cutoffDay` is the deadline day of the month
+  // (1–28). The enforced period is the most-recently-COMPLETED calendar
+  // month relative to that deadline (so before the cutoff we enforce last
+  // month, whose working days have all elapsed). The target number of days
+  // is the count of working days (Mon–Fri) in that month — computed at
+  // read time, not stored. Reminders fire only within `reminderLeadDays`
+  // days before the cutoff.
+  cutoffDay        Int     @default(24)
+  reminderLeadDays Int     @default(7)
+  minHoursPerDay   Float   @default(6)
+  notify           Boolean @default(false)
+  // Legacy fixed-range fields — kept so historical migrations line up but
+  // no longer used by the compliance logic (superseded by the monthly
+  // model above).
+  startDate      DateTime?
+  endDate        DateTime?
+  requiredDays   Int       @default(20)
+  updatedAt      DateTime  @updatedAt
+  updatedById    String?
+}
+
+// ============================================================================
+// Broadcast announcements
+// ----------------------------------------------------------------------------
+// Admin-authored messages shown as a modal to every targeted user. While
+// `active` is true, targeted users who haven't acknowledged see the modal
+// on load; acknowledging (with an optional comment) records a receipt so
+// the admin can see who has seen it. `audience` scopes who gets it:
+//   INTERNAL — staff only (role != REQUESTER)
+//   ALL      — everyone, including external requesters (client portal)
+model Announcement {
+  id          String    @id @default(cuid())
+  title       String
+  body        String
+  // Visual severity / kind: IMPORTANT (red) | INFO (green) | TIP (orange) |
+  // MANDATORY (blocking service-migration notice — non-dismissible; its only
+  // action sends the user to `redirectUrl`).
+  type        String   @default("INFO")
+  // Only for MANDATORY: the new address the "Go to the new address" button
+  // navigates to. Null for every other type.
+  redirectUrl String?
+  // When false the announcement is informational only — the modal just
+  // shows a Close button (no comment box, no acknowledgement required).
+  requireAck  Boolean  @default(true)
+  // When true (only meaningful with requireAck), the user MUST type a
+  // response before they can acknowledge — the comment becomes mandatory.
+  requireComment Boolean @default(false)
+  // Recurring re-show: if set, the announcement pops up again for a user
+  // once this many days have passed since their last acknowledgement,
+  // until `repeatUntil` (null = forever while active). Null = one-off.
+  repeatIntervalDays Int?
+  repeatUntil        DateTime?
+  // Targeting mode: ALL | INTERNAL (external=false) | EXTERNAL (external=true)
+  // | ROLES (targetRoles) | TEAMS (targetTeamIds) | USERS (targetUserIds).
+  audience      String   @default("ALL")
+  targetRoles   String[] @default([])
+  targetTeamIds String[] @default([])
+  targetUserIds String[] @default([])
+  active      Boolean   @default(false)
+  createdById String?
+  createdBy   User?     @relation("AnnouncementAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  activatedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  acks AnnouncementAck[]
+
+  @@index([active])
+}
+
+// One row per (announcement, user) once a user acknowledges. The optional
+// `comment` is the user's short response back to the admin.
+model AnnouncementAck {
+  id             String       @id @default(cuid())
+  announcementId String
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation("UserAnnouncementAcks", fields: [userId], references: [id], onDelete: Cascade)
+  comment        String?
+  acknowledgedAt DateTime     @default(now())
+
+  @@unique([announcementId, userId])
+  @@index([userId])
+}
+
+// ============================================================================
+// Applications catalogue
+// ----------------------------------------------------------------------------
+// A registry of internal / customer-facing applications the team ships.
+// Each Application captures the platform context (target OS, POS terminal
+// model, minimum supported version), a phase that mirrors the typical
+// release pipeline (Test → Pilot → Approved), free-text panels for
+// dependencies / important behaviour / important notes, plus a versioned
+// list of releases. Each release has its own "what was fixed" log,
+// optional release artifact and a scoped notes thread for
+// post-release commentary.
+
+enum ApplicationPhase {
+  TEST
+  PILOT
+  APPROVED
+}
+
+model Application {
+  id                 String   @id @default(cuid())
+  name               String
+  // Android/iOS package identifier (e.g. com.company.app). Shown on
+  // the catalogue cards and the application detail hero.
+  packageName        String?
+  description        String?
+  logoUrl            String?
+  // Long-form panels surfaced as separate sections on the detail page.
+  // All optional so the form can be filled in incrementally. Phase /
+  // target OS / POS terminal type / minimum version are tracked per
+  // *release* so a single application can ship a Test build, a Pilot
+  // build for one terminal model and an Approved build for another at
+  // the same time.
+  dependencies       String?
+  importantBehaviour String?
+  importantNotes     String?
+  createdById        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  createdBy User?        @relation("ApplicationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  releases  AppRelease[]
+  projects  Project[]
+
+  @@index([name])
+}
+
+model AppRelease {
+  id              String           @id @default(cuid())
+  applicationId   String
+  // Free-text version (e.g. "1.2.3", "2024.04-rc1"). We don't try to
+  // semver-parse so non-semver release names work too.
+  version         String
+  releaseDate     DateTime?
+  // Pipeline phase for THIS specific release. Each phase transition
+  // stamps a separate timestamp so the detail page can show "Tested
+  // on 12 May, Approved on 14 May" without inferring it from
+  // updatedAt.
+  phase           ApplicationPhase @default(TEST)
+  testAt          DateTime?        @default(now())
+  pilotAt         DateTime?
+  approvedAt      DateTime?
+  // Multi-select catalogs (admin-managed). Stored as Postgres text
+  // arrays so a single release can target several OSes / terminal
+  // models without spinning up a join table.
+  targetOs        String[]         @default([])
+  posTerminalType String[]         @default([])
+  minimumVersion  String?
+  // What changed in this release. Long-form text shown in the timeline.
+  fixes           String?
+  // Free-form important-notes panel mirroring the Application-level one
+  // but scoped to this single release (e.g. "rollback path requires
+  // factory reset on hardware older than P200 v3").
+  importantNotes  String?
+  // Optional release artifact. Uses the standard project-file uploader
+  // so the same allow-list / signed-URL chain protects it.
+  fileUrl         String?
+  fileName        String?
+  fileSize        Int?
+  fileMimeType    String?
+  uploadedById    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  application Application         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  uploadedBy  User?               @relation("AppReleaseUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  notes       AppReleaseNote[]
+  checkpoints ReleaseCheckpoint[]
+
+  @@index([applicationId, releaseDate])
+  @@index([applicationId, createdAt])
+  @@index([applicationId, phase])
+}
+
+// Admin-managed list of acceptable target-OS values for releases.
+// Mirrors the existing CountryOption / ClientOption / ProjectTypeOption
+// catalogs so the same Templates UI plumbing applies.
+model AppOsOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+// Admin-managed list of POS terminal types for releases.
+model AppPosTerminalOption {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+// Notes attached to a specific release. Mirrors the project Notes model
+// shape so the UI patterns can be reused — author, content, timestamps.
+model AppReleaseNote {
+  id        String   @id @default(cuid())
+  releaseId String
+  authorId  String
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  release AppRelease @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  author  User       @relation("AppReleaseNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([releaseId, createdAt])
+}
+
+// What kind of pipeline event a checkpoint represents. We keep this
+// narrow so the timeline stays scannable: each value maps to a colour
+// and an icon on the front-end.
+enum ReleaseCheckpointKind {
+  // Release deployed onto the prod network. The most common entry.
+  PROD_DEPLOY
+  // Release rolled back / pulled from prod. Pairs with PROD_DEPLOY for
+  // post-mortem reading.
+  PROD_ROLLBACK
+  // Pilot rollout went live (a real-world deployment, not just a phase
+  // change in the catalog).
+  PILOT_DEPLOY
+  // Test environment refreshed.
+  TEST_DEPLOY
+  // Catch-all for any operational note tied to a moment in time.
+  NOTE
+}
+
+// Operator-authored checkpoints that ride alongside the
+// admin/manager-controlled phase transitions. Anyone with the
+// `app:checkpoint:add` capability can stamp one — that's how a regular
+// USER can record "deployed v1.2.3 to prod at 02:13 UTC" without
+// needing the ability to declare the release's official phase.
+model ReleaseCheckpoint {
+  id          String                @id @default(cuid())
+  releaseId   String
+  authorId    String?
+  kind        ReleaseCheckpointKind @default(PROD_DEPLOY)
+  occurredAt  DateTime              @default(now())
+  // Optional environment / network label, free text — e.g. "EU-prod
+  // cluster A", "merchant fleet 1200". Keeps the checkpoint useful
+  // for rollback decisions without forcing a structured taxonomy.
+  environment String?
+  note        String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  release AppRelease @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  author  User?      @relation("ReleaseCheckpointAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([releaseId, occurredAt])
+}
+
+// ===========================================================================
+// TICKETING MODULE (phase 1 — in-app)
+// ---------------------------------------------------------------------------
+// A lightweight, Jira-style ticket that always belongs to a project. The
+// conversation lives in TicketMessage rows (customer-facing replies vs.
+// agent-only internal notes). Email ingestion is intentionally NOT modelled
+// yet: `source` reserves the EMAIL value and mailbox/ingestion tables can be
+// added later without touching these models.
+// ===========================================================================
+
+enum TicketStatus {
+  NEW         // Just opened, untouched
+  OPEN        // An agent has picked it up
+  IN_PROGRESS // Actively being worked on
+  PENDING     // Waiting on the requester / a third party
+  RESOLVED    // Answered, awaiting confirmation
+  CLOSED      // Done, no further action expected
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+// Jira-style issue type. Fixed set for phase 1; admin-configurable types
+// can replace this enum with a lookup table later if needed.
+enum TicketType {
+  INCIDENT
+  REQUEST
+  QUESTION
+  PROBLEM
+}
+
+// Where the ticket originated. Only IN_APP is used today; EMAIL is reserved
+// so the optional inbound-email phase needs no enum migration.
+enum TicketSource {
+  IN_APP
+  EMAIL
+}
+
+enum TerminalOS {
+  LINUX
+  ANDROID
+}
+
+enum TicketFieldType {
+  TERMINAL
+  CLIENT
+  TEXT
+  SELECT
+  YESNO
+}
+
+enum TicketMessageDirection {
+  INBOUND   // From the requester (or, later, an inbound email)
+  OUTBOUND  // Agent reply visible to the requester
+  INTERNAL  // Agent-only note — never shown to the requester
+}
+
+model Ticket {
+  id          String         @id @default(cuid())
+  // Human-friendly identifier (e.g. TKT-0042), generated in the backend
+  // at creation — globally unique, unlike per-project task codes.
+  code        String         @unique
+  subject     String
+  description String?
+  status      TicketStatus   @default(NEW)
+  priority    TicketPriority @default(NORMAL)
+  type        TicketType     @default(REQUEST)
+  source      TicketSource   @default(IN_APP)
+  // Internal tickets are private: visible only to the reporter, assignee
+  // and explicitly-added participants (plus admins) — never the shared
+  // or open queue. External (default) tickets behave like all others.
+  internal    Boolean        @default(false)
+
+  // Project the ticket belongs to. Optional: requesters open tickets
+  // WITHOUT picking a project — a resolver assigns it later. SetNull so
+  // deleting a project just unlinks its tickets rather than blocking.
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  // The admin-defined request type the requester picked (e.g. "Problem
+  // on page"). The chosen type's project is what fills projectId above.
+  // Nullable so tickets created another way (email later, or before any
+  // types exist) still work.
+  requestTypeId String?
+  requestType   TicketRequestType? @relation(fields: [requestTypeId], references: [id], onDelete: SetNull)
+
+  // Structured values captured from the admin-defined custom fields when
+  // the ticket was raised. Terminal + client are first-class references
+  // (so resolvers can filter/report); free-text and multi-select values
+  // live denormalised in `fieldValues` (array of {fieldId,label,type,value})
+  // so they survive a later field-definition change.
+  clientId String?
+  client   Client? @relation("ClientTickets", fields: [clientId], references: [id], onDelete: SetNull)
+  terminalModelId String?
+  terminalModel   TerminalModel? @relation("TerminalModelTickets", fields: [terminalModelId], references: [id], onDelete: SetNull)
+  fieldValues     Json?
+
+  // Who opened it. Restrict mirrors the app's "authorship is permanent
+  // history" stance (see ChangeRequest.createdBy).
+  reporterId String
+  reporter   User   @relation("TicketReporter", fields: [reporterId], references: [id], onDelete: Restrict)
+
+  // Who's handling it (an agent). Optional — unassigned tickets sit in a queue.
+  assigneeId String?
+  assignee   User?   @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  // Optional team scope, reserved for future queue routing.
+  teamId String?
+  team   Team?   @relation("TeamTickets", fields: [teamId], references: [id], onDelete: SetNull)
+
+  closedById String?
+  closedBy   User?    @relation("TicketClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  closedAt   DateTime?
+
+  // Soft delete: deleting a ticket stamps `deletedAt` (auditable +
+  // restorable from the activity feed) instead of physically removing it.
+  // The Prisma client extension auto-filters deletedAt=null on every read
+  // so ghosts never leak into queues / stats / search until restored.
+  deletedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages     TicketMessage[]
+  participants TicketParticipant[]
+  // "Shared with" view grants — read-only access handed out via the
+  // Share button (or a #reference) WITHOUT enrolling the recipient as a
+  // participant, so they can open the ticket but aren't subscribed to
+  // every future message.
+  shares       TicketShare[]
+  events       TicketEvent[]
+  attachments  TicketAttachment[]
+  // Per-user read cursors — power the "Seen" receipt on sent messages.
+  reads        TicketRead[]
+  // Tasks created from this ticket via the resolver's "Add as Task".
+  tasks        Task[]              @relation("TicketTasks")
+
+  @@index([projectId])
+  @@index([status])
+  @@index([assigneeId])
+  @@index([reporterId])
+  @@index([requestTypeId])
+  @@index([clientId])
+  @@index([terminalModelId])
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+model TicketMessage {
+  id        String                 @id @default(cuid())
+  ticketId  String
+  ticket    Ticket                 @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  // Author is nullable so a deleted user's messages survive as history.
+  authorId  String?
+  author    User?                  @relation("TicketMessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  direction TicketMessageDirection @default(OUTBOUND)
+  body      String
+  createdAt DateTime               @default(now())
+
+  attachments TicketAttachment[]
+
+  @@index([ticketId, createdAt])
+}
+
+// Timeline events shown in the ticket activity feed alongside messages
+// (e.g. "status changed to In progress", "assigned to Maya"). Free-form
+// from/to strings keep one table flexible across event kinds.
+enum TicketEventKind {
+  CREATED
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  ASSIGNED
+  UNASSIGNED
+  REOPENED
+}
+
+// Admin-defined request type shown as a card on the requester portal.
+// A type is NOT tied to a project — the requester picks the project when
+// raising the ticket (and a resolver can change it). The optional
+// projectId below is a soft default/hint only; a future "profit center"
+// link will replace it.
+model TicketRequestType {
+  id              String          @id @default(cuid())
+  name            String
+  description     String?
+  // Optional Tabler/lucide icon name for the portal card.
+  icon            String?
+  // Optional colour key (e.g. "blue", "red") from the shared palette in
+  // frontend/src/lib/ticketTypeColors.js — used to tint the type badge so
+  // POS / SoftPOS / etc. are distinguishable at a glance. Null = default.
+  color           String?
+  // Optional default/hint project (not enforced; requester chooses).
+  projectId       String?
+  project         Project?        @relation("ProjectTicketRequestTypes", fields: [projectId], references: [id], onDelete: SetNull)
+  // Optional default priority pre-selected on the form.
+  defaultPriority TicketPriority?
+  active          Boolean         @default(true)
+  position        Int             @default(0)
+  createdById     String?
+  createdBy       User?           @relation("TicketRequestTypeCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  tickets Ticket[]
+  // Agents allowed to see tickets of this type. Empty = unrestricted
+  // (every agent sees the open queue, the original behaviour). When
+  // non-empty, only these users (plus admins / the reporter) can see
+  // this type's tickets — a private team queue.
+  agents  TicketRequestTypeAgent[]
+  // Custom fields specific to this type (in addition to global ones).
+  fieldDefs TicketFieldDef[] @relation("RequestTypeFieldDefs")
+  // Clients whose external users are allowed to raise this type.
+  allowedClients ClientTicketType[]
+  // Internal requesters allowed to raise this type.
+  allowedUsers UserTicketType[]
+
+  @@index([projectId])
+  @@index([active])
+}
+
+// Join: an INTERNAL requester may only raise these ticket request types.
+// No rows for a user = no types (strict).
+model UserTicketType {
+  userId        String
+  requestTypeId String
+  user          User              @relation("UserTicketTypes", fields: [userId], references: [id], onDelete: Cascade)
+  requestType   TicketRequestType @relation(fields: [requestTypeId], references: [id], onDelete: Cascade)
+
+  @@id([userId, requestTypeId])
+  @@index([requestTypeId])
+}
+
+// Join: which agents are allowed to handle / see a given request type.
+model TicketRequestTypeAgent {
+  requestTypeId String
+  userId        String
+  requestType   TicketRequestType @relation(fields: [requestTypeId], references: [id], onDelete: Cascade)
+  user          User              @relation("TicketTypeAgentUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([requestTypeId, userId])
+  @@index([userId])
+}
+
+// Admin-defined group of requesters. A requester can add a whole group
+// as ticket participants in one go (e.g. "Finance team").
+model RequesterGroup {
+  id        String                 @id @default(cuid())
+  name      String
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+  members   RequesterGroupMember[]
+}
+
+model RequesterGroupMember {
+  groupId String
+  userId  String
+  group   RequesterGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user    User           @relation("RequesterGroupMemberUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId])
+}
+
+// Terminal catalog (admin-managed). A Vendor groups TerminalModels; each
+// model carries its OS type. Used when raising tickets so a requester can
+// pick Vendor -> Model (which fixes the OS type).
+model TerminalVendor {
+  id        String          @id @default(cuid())
+  name      String
+  active    Boolean         @default(true)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  models    TerminalModel[]
+
+  @@index([name])
+}
+
+model TerminalModel {
+  id        String         @id @default(cuid())
+  name      String
+  osType    TerminalOS
+  active    Boolean        @default(true)
+  vendorId  String
+  vendor    TerminalVendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  tickets   Ticket[]       @relation("TerminalModelTickets")
+
+  @@index([vendorId])
+}
+
+// Admin-defined, GLOBAL set of extra fields shown on the raise-ticket
+// form. TERMINAL / CLIENT are built-in structured pickers (at most one
+// each); TEXT is a free name/value field (e.g. Merchant ID, Host TID);
+// SELECT is a multi-select whose choices live in `options` (string[]).
+model TicketFieldDef {
+  id            String             @id @default(cuid())
+  type          TicketFieldType
+  label         String
+  options       Json?
+  required      Boolean            @default(false)
+  position      Int                @default(0)
+  active        Boolean            @default(true)
+  // NULL = global (shown on every raise form). Otherwise the field
+  // belongs to one ticket request type and only shows for it.
+  requestTypeId String?
+  requestType   TicketRequestType? @relation("RequestTypeFieldDefs", fields: [requestTypeId], references: [id], onDelete: Cascade)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([position])
+  @@index([requestTypeId])
+}
+
+// Watcher / collaborator on a ticket (the "request participants" + share
+// affordance on the requester portal).
+model TicketParticipant {
+  ticketId  String
+  userId    String
+  addedById String?
+  addedAt   DateTime @default(now())
+
+  ticket  Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user    User   @relation("TicketParticipantUser", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User?  @relation("TicketParticipantAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@id([ticketId, userId])
+  @@index([userId])
+}
+
+// A read-only "shared with" grant. Unlike TicketParticipant this does NOT
+// make the user a watcher (no per-message notifications) — it only lets
+// them OPEN a ticket they'd otherwise not be allowed to see. Created by
+// the Share button and by #references, so pointing someone at a ticket
+// actually lets them view it even when they're not otherwise involved.
+model TicketShare {
+  ticketId   String
+  userId     String
+  sharedById String?
+  sharedAt   DateTime @default(now())
+
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user     User   @relation("TicketShareUser", fields: [userId], references: [id], onDelete: Cascade)
+  sharedBy User?  @relation("TicketShareSharedBy", fields: [sharedById], references: [id], onDelete: SetNull)
+
+  @@id([ticketId, userId])
+  @@index([userId])
+}
+
+// Per-user "I've read up to here" cursor for a ticket. A message I sent
+// is "seen" by another user U iff U's lastReadAt >= message.createdAt —
+// the same model the project chat uses for its Seen receipts.
+model TicketRead {
+  ticketId   String
+  userId     String
+  lastReadAt DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User   @relation("TicketReadUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([ticketId, userId])
+  @@index([userId])
+}
+
+model TicketEvent {
+  id        String          @id @default(cuid())
+  ticketId  String
+  ticket    Ticket          @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actorId   String?
+  actor     User?           @relation("TicketEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  kind      TicketEventKind
+  fromValue String?
+  toValue   String?
+  createdAt DateTime        @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+// Files attached to a ticket (by the requester or an agent). Stored on
+// disk under /uploads/files like project files; `url` is the unsigned
+// stored path — responses wrap it with a short-lived signed URL. A
+// broad block-list (no .exe / scripts / .svg / .html, see lib/upload.js)
+// gates what can land here, rather than the project allow-list.
+model TicketAttachment {
+  id           String   @id @default(cuid())
+  ticketId     String
+  ticket       Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  // Optional: the comment this file is attached to. Null = a ticket-
+  // level attachment (the original "raise" upload or a standalone add).
+  // SetNull on message delete keeps the file as a ticket-level record.
+  messageId    String?
+  message      TicketMessage? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  // Uploader is nullable so a deleted user's attachments survive.
+  uploaderId   String?
+  uploader     User?    @relation("TicketAttachmentUploader", fields: [uploaderId], references: [id], onDelete: SetNull)
+  filename     String
+  originalName String
+  url          String
+  size         Int
+  mime         String?
+  // Image attachments auto-expire (default ~2 months) so pasted photos
+  // don't pile up forever. Null = kept indefinitely (non-image files).
+  expiresAt    DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+  @@index([messageId])
+  @@index([expiresAt])
+}
+
+// Saved exports (currently time-tracking CSVs). Each row is a byte-for-
+// byte snapshot of a generated export stored under uploads/exports so it
+// can be re-downloaded exactly as produced. `kind` groups the export
+// type ('TIME_CSV' today; extensible). `meta` keeps the filters/columns
+// used so the history UI can describe each row. Pruned after `expiresAt`.
+model ExportRecord {
+  id          String   @id @default(cuid())
+  kind        String   @default("TIME_CSV")
+  filename    String
+  storagePath String
+  sizeBytes   Int      @default(0)
+  rowCount    Int?
+  meta        Json?
+  createdById String?
+  createdBy   User?    @relation("UserExports", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([kind, createdAt])
+  @@index([createdById])
+  @@index([expiresAt])
+}
