@@ -58,7 +58,18 @@ after changing `.env` run `docker compose build frontend`.
 - Option catalogues (statuses, priorities, phases, …) are seeded on first
   boot by `ensureDefaultTemplates()`.
 
-## 5. First start
+## 5. Server prerequisites
+
+- Docker Engine + Compose plugin installed and running
+  (`sudo systemctl enable --now docker`), and your user in the `docker`
+  group (`sudo usermod -aG docker $USER`, then log out/in or `newgrp docker`).
+- Behind a corporate proxy: set `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` in
+  the root `.env` (build-time `npm install`) **and** give the Docker daemon
+  the same proxy via `/etc/systemd/system/docker.service.d/http-proxy.conf`
+  (image pulls) — the exact commands are in `.env.example`. Test with
+  `docker pull node:20-alpine` before building.
+
+## 6. First start
 
 ```
 cp .env.example .env && cp backend/.env.example backend/.env   # then edit both
@@ -71,7 +82,7 @@ Open `APP_ORIGIN` and **register the first user** — the boot-time
 exists, so the first registration becomes the administrator. Every later
 registration waits for admin approval.
 
-## 6. Operations
+## 7. Operations
 
 - Backups: `scripts/backup.sh` (Linux) / `scripts/backup.ps1` (Windows),
   restore with `scripts/restore.sh` — wiring and cron line in
@@ -82,7 +93,7 @@ registration waits for admin approval.
   customer's history from the single `v1.0.0 — Initial release` entry in
   `backend/RELEASE_NOTES.md`.
 
-## 7. Before handing over — sanity grep
+## 8. Before handing over — sanity grep
 
 Run from the repo root; it should print nothing:
 

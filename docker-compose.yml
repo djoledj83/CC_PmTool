@@ -20,7 +20,18 @@ services:
 #       - app-network
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      # Corporate proxy for `npm install` during the image build. Taken
+      # from the root .env (HTTP_PROXY / HTTPS_PROXY / NO_PROXY); empty
+      # when unset, which Docker treats as "no proxy". NOTE: the Docker
+      # daemon pulling base images needs its own proxy config in
+      # /etc/systemd/system/docker.service.d/http-proxy.conf — see
+      # TEMPLATE_SETUP.md.
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
     container_name: PM-Backend
     restart: unless-stopped
     # backend/.env holds runtime secrets (DB URL, JWT, SMTP credentials)
@@ -124,6 +135,10 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.prod
       args:
+        # Same proxy pass-through as the backend build (see above).
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
         VITE_API_URL: ${API_URL:-http://localhost:5000}
         # Branding (also build-time) — same APP_NAME the backend uses.
         VITE_APP_NAME: ${APP_NAME:-PM Tool}
