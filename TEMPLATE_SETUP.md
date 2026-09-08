@@ -90,7 +90,14 @@ Open `APP_ORIGIN` and **register the first user** — the boot-time
 exists, so the first registration becomes the administrator. Every later
 registration waits for admin approval.
 
-## 7. Operations
+## 7. Reverse proxy (recommended for real installs)
+
+Put host nginx in front so users open `http://<server>/` with no ports and
+HTTPS can be added in one place: `deploy/nginx-host.conf` +
+`docs/reverse-proxy.md`. Then `APP_ORIGIN` = `API_URL` = the proxy origin and
+`BIND_ADDRESS=127.0.0.1` in `.env`, and rebuild the frontend.
+
+## 8. Operations
 
 - Backups: `scripts/backup.sh` (Linux) / `scripts/backup.ps1` (Windows),
   restore with `scripts/restore.sh` — wiring and cron line in
@@ -101,7 +108,7 @@ registration waits for admin approval.
   customer's history from the single `v1.0.0 — Initial release` entry in
   `backend/RELEASE_NOTES.md`.
 
-## 8. Before handing over — sanity grep
+## 9. Before handing over — sanity grep
 
 Run from the repo root; it should print nothing:
 
