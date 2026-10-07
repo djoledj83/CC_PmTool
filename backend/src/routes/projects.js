@@ -707,18 +707,67 @@ async function ensureDefaultPhases(projectId) {
     });
 }
 
+// The caller's own involvement in each listed project: participant or
+// not, and how many live tasks are assigned to them. Lets pickers such
+// as Time tracking → Log time tag "your" projects and offer admins (who
+// see every shared project) an "Only mine" filter. Two indexed queries
+// for the whole list — never one per project.
+async function involvementByProject(userId, projectIds) {
+    const map = new Map();
+    if (!userId || projectIds.length === 0) return map;
+    const [participations, assigned] = await Promise.all([
+        prisma.projectParticipant.findMany({
+            where: { userId, projectId: { in: projectIds } },
+            select: { projectId: true },
+        }),
+        prisma.task.groupBy({
+            by: ['projectId'],
+            where: {
+                assigneeId: userId,
+                deletedAt: null,
+                projectId: { in: projectIds },
+            },
+            _count: { _all: true },
+        }),
+    ]);
+    const slot = (id) => {
+        if (!map.has(id)) map.set(id, { participant: false, assignedTasks: 0 });
+        return map.get(id);
+    };
+    for (const row of participations) slot(row.projectId).participant = true;
+    for (const row of assigned) {
+        slot(row.projectId).assignedTasks = row._count?._all ?? 0;
+    }
+    return map;
+}
+
 // Admins see every project; everyone else only sees projects they're
 // involved in (owner or participant).
 router.get('/', async (req, res, next) => {
     try {
         const ids = await accessibleProjectIds(req);
         const where = { id: { in: ids } };
-        const projects = await prisma.project.findMany({
-            where,
-            orderBy: { createdAt: 'desc' },
-            include: projectInclude,
+        const [projects, involvement] = await Promise.all([
+            prisma.project.findMany({
+                where,
+                orderBy: { createdAt: 'desc' },
+                include: projectInclude,
+            }),
+            involvementByProject(req.user.id, ids),
+        ]);
+        res.json({
+            projects: projects.map((p) => {
+                const inv = involvement.get(p.id);
+                return {
+                    ...forList(p),
+                    involvement: {
+                        owner: p.ownerId === req.user.id,
+                        participant: Boolean(inv?.participant),
+                        assignedTasks: inv?.assignedTasks || 0,
+                    },
+                };
+            }),
         });
-        res.json({ projects: projects.map(forList) });
     } catch (err) {
         next(err);
     }

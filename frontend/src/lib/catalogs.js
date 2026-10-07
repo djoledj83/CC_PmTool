@@ -72,14 +72,21 @@ export function invalidateCatalog(path) {
 }
 
 // Hook returning `{ items, loading, refresh }` for a catalog. Pass
-// `{ all: true }` from the admin page to also include hidden rows.
-function useCatalog(path, { all = false } = {}) {
+// `{ all: true }` from the admin page to also include hidden rows, and
+// `{ enabled: false }` to skip the request (e.g. a catalogue a portal
+// account isn't allowed to read).
+function useCatalog(path, { all = false, enabled = true } = {}) {
     const kind = all ? 'all' : 'active';
     const k = key(path, kind);
-    const [items, setItems] = useState(() => cache.get(k) || []);
-    const [loading, setLoading] = useState(() => !cache.has(k));
+    const [items, setItems] = useState(() => (enabled ? cache.get(k) || [] : []));
+    const [loading, setLoading] = useState(() => enabled && !cache.has(k));
 
     useEffect(() => {
+        if (!enabled) {
+            setItems([]);
+            setLoading(false);
+            return undefined;
+        }
         let cancelled = false;
         const handler = () => {
             if (cancelled) return;
@@ -98,7 +105,7 @@ function useCatalog(path, { all = false } = {}) {
             cancelled = true;
             getSubs(k).delete(handler);
         };
-    }, [k, path, kind]);
+    }, [k, path, kind, enabled]);
 
     return {
         items,

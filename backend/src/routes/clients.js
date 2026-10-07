@@ -80,6 +80,17 @@ function normalizeContacts(contacts = []) {
 
 router.get('/', async (req, res, next) => {
     try {
+        // Internal requesters (the raise form's Client field) only get the
+        // active clients' names — no contacts, addresses or notes.
+        // (External requesters can't reach this route at all.)
+        if (req.user.role === 'REQUESTER') {
+            const clients = await prisma.client.findMany({
+                where: { isActive: true },
+                orderBy: [{ name: 'asc' }],
+                select: { id: true, name: true },
+            });
+            return res.json({ clients });
+        }
         const q = (req.query.q || '').trim();
         const includeInactive =
             req.query.includeInactive === '1' ||

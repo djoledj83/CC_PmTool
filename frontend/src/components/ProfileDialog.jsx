@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { api } from '@/lib/api';
+import { api, setAccessToken } from '@/lib/api';
 import { cn, initials, resolveAssetUrl } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import { useBusinessUnits, useCountries } from '@/lib/catalogs';
@@ -114,6 +114,9 @@ function formatStamp(d) {
 export function ProfileDialog({ open, onOpenChange }) {
     const { user, updateCurrentUser } = useAuth();
     const isAdmin = user?.role === 'ADMIN';
+    // Portal (requester) accounts: no org chart, and their e-mail is their
+    // login — an administrator changes it.
+    const isRequester = user?.role === 'REQUESTER';
     const fileInputRef = useRef(null);
     const [uploading, setUploading] = useState(false);
     const [savingProfile, setSavingProfile] = useState(false);
@@ -129,10 +132,13 @@ export function ProfileDialog({ open, onOpenChange }) {
     // while the dialog is open to keep the cost off the home screen.
     const [teamLeaderOptions, setTeamLeaderOptions] = useState([]);
     const { items: countryOptions } = useCountries();
-    const { items: businessUnitOptions } = useBusinessUnits();
+    // Business units are staff-only (the API refuses portal accounts).
+    const { items: businessUnitOptions } = useBusinessUnits({
+        enabled: !isRequester,
+    });
 
     useEffect(() => {
-        if (!open) return;
+        if (!open || isRequester) return undefined;
         let cancelled = false;
         api.get('/users')
             .then(({ data }) => {
@@ -144,7 +150,7 @@ export function ProfileDialog({ open, onOpenChange }) {
         return () => {
             cancelled = true;
         };
-    }, [open]);
+    }, [open, isRequester]);
 
     const {
         register,
@@ -268,14 +274,16 @@ export function ProfileDialog({ open, onOpenChange }) {
         try {
             const payload = {
                 name: values.name,
-                email: values.email,
                 phone: values.phone || null,
                 position: values.position || null,
                 country: values.country?.trim() || null,
                 currency: values.currency?.trim() || null,
                 about: values.about?.trim() || null,
-                teamLeaderId: values.teamLeaderId || null,
             };
+            if (!isRequester) {
+                payload.email = values.email;
+                payload.teamLeaderId = values.teamLeaderId || null;
+            }
             // Business unit can only be changed by an admin (per the
             // product spec). Don't include the field for non-admins so
             // a stale form value never silently overrides what an
@@ -338,16 +346,20 @@ export function ProfileDialog({ open, onOpenChange }) {
     const submitPassword = async (values) => {
         setSavingPassword(true);
         try {
-            await api.post('/auth/change-password', {
+            const { data } = await api.post('/auth/change-password', {
                 currentPassword: values.currentPassword,
                 newPassword: values.newPassword,
             });
+            // The server signed out every other session and handed THIS
+            // tab a fresh token (the refresh cookie was re-issued too), so
+            // swap it in right away and keep working without a hiccup.
+            if (data?.accessToken) setAccessToken(data.accessToken);
             resetPwd({
                 currentPassword: '',
                 newPassword: '',
                 confirmPassword: '',
             });
-            toast.success('Password changed');
+            toast.success('Password changed — you were signed out on other devices');
         } catch (err) {
             toast.error(
                 err.response?.data?.error || 'Could not change password',
@@ -480,8 +492,9 @@ export function ProfileDialog({ open, onOpenChange }) {
                     </div>
                 </div>
 
-                {/* Personal time-tracking mini-dashboard (about you only) */}
-                <ProfileStatsPanel />
+                {/* Personal time-tracking mini-dashboard (about you only).
+                    Portal accounts don't log time. */}
+                {!isRequester && <ProfileStatsPanel />}
 
                 {/* Profile details form */}
                 <form
@@ -491,7 +504,9 @@ export function ProfileDialog({ open, onOpenChange }) {
                     <div>
                         <h4 className="text-sm font-semibold">Details</h4>
                         <p className="text-xs text-muted-foreground">
-                            Visible to teammates across the workspace.
+                            {isRequester
+                                ? 'Shown to the support team on your requests.'
+                                : 'Visible to teammates across the workspace.'}
                         </p>
                     </div>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -519,8 +534,16 @@ export function ProfileDialog({ open, onOpenChange }) {
                             <Input
                                 id="profile-email"
                                 type="email"
+                                readOnly={isRequester}
+                                className={isRequester ? 'bg-muted/40' : undefined}
                                 {...register('email')}
                             />
+                            {isRequester && (
+                                <p className="text-[11px] text-muted-foreground">
+                                    Your sign-in e-mail — ask your administrator
+                                    to change it.
+                                </p>
+                            )}
                             {errors.email && (
                                 <p className="text-xs text-destructive">
                                     {errors.email.message}
@@ -554,6 +577,7 @@ export function ProfileDialog({ open, onOpenChange }) {
                                 {...register('position')}
                             />
                         </div>
+                        {!isRequester && (
                         <div className="space-y-1.5">
                             <Label className="flex items-center gap-1.5 text-xs">
                                 <Briefcase className="h-3 w-3" /> Employee code
@@ -569,6 +593,7 @@ export function ProfileDialog({ open, onOpenChange }) {
                                 Set by an administrator.
                             </p>
                         </div>
+                        )}
                     </div>
 
                     {/* Personal & business info — separated visually so
@@ -578,8 +603,9 @@ export function ProfileDialog({ open, onOpenChange }) {
                     <div>
                         <h4 className="text-sm font-semibold">Personal &amp; business</h4>
                         <p className="text-xs text-muted-foreground">
-                            Helps teammates know where you sit, who you report to,
-                            and a bit about you.
+                            {isRequester
+                                ? 'Optional — helps the support team know where you are.'
+                                : 'Helps teammates know where you sit, who you report to, and a bit about you.'}
                         </p>
                     </div>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -630,6 +656,8 @@ export function ProfileDialog({ open, onOpenChange }) {
                                 )}
                             </datalist>
                         </div>
+                        {!isRequester && (
+                        <>
                         <div className="space-y-1.5">
                             <Label
                                 htmlFor="profile-teamleader"
@@ -719,6 +747,8 @@ export function ProfileDialog({ open, onOpenChange }) {
                                 </p>
                             )}
                         </div>
+                        </>
+                        )}
                         <div className="space-y-1.5 sm:col-span-2">
                             <Label
                                 htmlFor="profile-about"

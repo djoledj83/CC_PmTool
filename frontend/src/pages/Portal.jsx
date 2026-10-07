@@ -1,25 +1,34 @@
 // Requester portal landing: pick a request type (card) to raise a
 // request, and browse your own requests with simple filters. Mirrors a
 // help-center: requesters never see projects or the agent queue.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRealtime } from '@/contexts/RealtimeContext';
 import { toast } from 'sonner';
 import {
     Loader2,
-    Plus,
     Search,
     List as ListIcon,
     LayoutGrid,
     Columns3,
+    FileText,
+    Send,
+    Users,
 } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { uploadTicketFile } from '@/components/TicketAttachments';
+import { sanitizeHtml } from '@/components/RichText';
 import {
-    PendingFilePicker,
-    uploadTicketFile,
-} from '@/components/TicketAttachments';
+    DescriptionField,
+    FileDropzone,
+    FormLabel,
+    IconInput,
+    RaiseHelpCards,
+    RaiseShell,
+    RemovableChip,
+} from '@/components/RaiseTicketParts';
 import { getTicketTypeIcon } from '@/lib/ticketTypeIcons';
 import { getTicketTypeChipClasses } from '@/lib/ticketTypeColors';
 import { RequesterPicker } from '@/components/RequesterPicker';
@@ -28,23 +37,15 @@ import TicketBoardColumns from '@/components/TicketBoardColumns';
 import TicketCardShared from '@/components/TicketCardShared';
 import TicketCustomFields from '@/components/TicketCustomFields';
 import {
-    ChoiceRow,
+    ChoiceCards,
     CATEGORY_CHOICES,
     PRIORITY_CHOICES,
 } from '@/components/TicketChoiceFields';
 import PortalRequest from '@/pages/PortalRequest';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { Label } from '@/components/ui/label';
-import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogFooter,
-    DialogHeader,
-    DialogTitle,
-} from '@/components/ui/dialog';
+
+import { Dialog, DialogContent } from '@/components/ui/dialog';
 import {
     Select,
     SelectContent,
@@ -210,8 +211,9 @@ export default function Portal() {
                     </p>
                 ) : types.length === 0 ? (
                     <p className="mt-4 rounded-lg border border-dashed bg-background p-4 text-sm text-muted-foreground">
-                        No request types are available yet. An administrator
-                        needs to create some.
+                        {user?.role === 'REQUESTER'
+                            ? 'There are no request types you can raise yet. Your administrator needs to enable them for your account or organisation.'
+                            : 'No request types are available yet. An administrator needs to create some.'}
                     </p>
                 ) : (
                     <div className="mt-4 grid items-stretch gap-3 sm:grid-cols-2">
@@ -425,16 +427,17 @@ export default function Portal() {
                     if (!o) setSelectedId(null);
                 }}
             >
-                <DialogContent className="w-[90vw] max-w-[90vw] gap-0 overflow-hidden p-0 sm:w-[90vw] sm:max-w-[90vw]">
+                {/* Same window as the agent workspace: fixed height on
+                    desktop so the conversation and the details column
+                    scroll on their own. */}
+                <DialogContent className="flex max-h-[94vh] flex-col gap-0 overflow-hidden p-0 lg:h-[94vh]">
                     {selectedId && (
-                        <div className="overflow-hidden">
-                            <PortalRequest
-                                key={selectedId}
-                                idProp={selectedId}
-                                onClose={() => setSelectedId(null)}
-                                onChanged={reloadTickets}
-                            />
-                        </div>
+                        <PortalRequest
+                            key={selectedId}
+                            idProp={selectedId}
+                            onClose={() => setSelectedId(null)}
+                            onChanged={reloadTickets}
+                        />
                     )}
                 </DialogContent>
             </Dialog>
@@ -442,15 +445,22 @@ export default function Portal() {
     );
 }
 
+// "Raise new ticket" for requesters: title, category / priority cards, a
+// rich-text description, the request type's custom fields (terminal on its
+// own row; then Client | Share with | Attachments on one line) and a help
+// column (tips + admin-configured resources / on-call contact).
+const uniqById = (list) => [...new Map(list.map((x) => [x.id, x])).values()];
+
 function RaiseRequestDialog({ requestType, onOpenChange, onCreated }) {
     const { user } = useAuth();
     const [subject, setSubject] = useState('');
-    const [description, setDescription] = useState('');
+    const [descHtml, setDescHtml] = useState('');
+    const [descEmpty, setDescEmpty] = useState(true);
     const [priority, setPriority] = useState('NORMAL');
     const [category, setCategory] = useState('REQUEST');
     const [pendingFiles, setPendingFiles] = useState([]);
-    const [coUserIds, setCoUserIds] = useState([]);
-    const [coGroupIds, setCoGroupIds] = useState([]);
+    const [coUsers, setCoUsers] = useState([]);
+    const [coGroups, setCoGroups] = useState([]);
     const [custom, setCustom] = useState({
         fields: [],
         clientId: '',
@@ -458,16 +468,21 @@ function RaiseRequestDialog({ requestType, onOpenChange, onCreated }) {
         fieldValues: [],
     });
     const [saving, setSaving] = useState(false);
+    // Highlight the empty required boxes only after a submit attempt.
+    const [tried, setTried] = useState(false);
+    const fileInputRef = useRef(null);
 
     useEffect(() => {
         if (requestType) {
             setSubject('');
-            setDescription('');
+            setDescHtml('');
+            setDescEmpty(true);
             setPriority(requestType.defaultPriority || 'NORMAL');
             setCategory('REQUEST');
             setPendingFiles([]);
-            setCoUserIds([]);
-            setCoGroupIds([]);
+            setCoUsers([]);
+            setCoGroups([]);
+            setTried(false);
             setCustom({
                 fields: [],
                 clientId: '',
@@ -500,7 +515,9 @@ function RaiseRequestDialog({ requestType, onOpenChange, onCreated }) {
     };
 
     const save = async () => {
-        if (!subject.trim()) return toast.error('Enter a subject.');
+        setTried(true);
+        if (!subject.trim()) return toast.error('Enter a title.');
+        if (descEmpty) return toast.error('Add a description.');
         const missing = missingFields();
         if (missing.length)
             return toast.error(`Please fill in: ${missing.join(', ')}.`);
@@ -509,12 +526,12 @@ function RaiseRequestDialog({ requestType, onOpenChange, onCreated }) {
             // Requesters don't choose a project — a resolver assigns it.
             const { data } = await api.post('/tickets', {
                 subject: subject.trim(),
-                description: description.trim() || undefined,
+                description: sanitizeHtml(descHtml),
                 requestTypeId: requestType.id,
                 type: category,
                 priority,
-                participantIds: coUserIds,
-                groupIds: coGroupIds,
+                participantIds: coUsers.map((u) => u.id),
+                groupIds: coGroups.map((g) => g.id),
                 clientId: custom.clientId || undefined,
                 terminalModelId: custom.terminalModelId || undefined,
                 fieldValues: custom.fieldValues,
@@ -531,114 +548,85 @@ function RaiseRequestDialog({ requestType, onOpenChange, onCreated }) {
         }
     };
 
-    return (
-        <Dialog open={!!requestType} onOpenChange={onOpenChange}>
-            <DialogContent className="flex max-h-[90vh] flex-col">
-                <DialogHeader className="shrink-0">
-                    <DialogTitle>{requestType?.name || 'New request'}</DialogTitle>
-                    <DialogDescription>
-                        {requestType?.description ||
-                            'Tell us what you need and we’ll get back to you.'}
-                    </DialogDescription>
-                </DialogHeader>
-                <div className="grid min-h-0 flex-1 content-start gap-3 overflow-y-auto px-1 sm:grid-cols-2">
-                    <div className="space-y-1.5 sm:col-span-2">
-                        <Label className="text-xs">Ticket title</Label>
-                        <Input
-                            value={subject}
-                            onChange={(e) => setSubject(e.target.value)}
-                            placeholder="Short title for your request"
+    const TypeIcon = requestType ? getTicketTypeIcon(requestType.icon) : null;
+
+    const shareCell = (
+        <div key="share" className="min-w-0 space-y-1.5">
+            <FormLabel optional>Share with</FormLabel>
+            <RequesterPicker
+                label="Add people / group"
+                triggerVariant="field"
+                excludeUserIds={[user?.id, ...coUsers.map((u) => u.id)].filter(
+                    Boolean,
+                )}
+                onConfirm={({ users = [], groups = [] }) => {
+                    setCoUsers((prev) => uniqById([...prev, ...users]));
+                    setCoGroups((prev) => uniqById([...prev, ...groups]));
+                }}
+            />
+            {(coUsers.length > 0 || coGroups.length > 0) && (
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {coGroups.map((g) => (
+                        <RemovableChip
+                            key={`g-${g.id}`}
+                            icon={Users}
+                            label={g.name}
+                            onRemove={() =>
+                                setCoGroups((prev) => prev.filter((x) => x.id !== g.id))
+                            }
                         />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 sm:col-span-2">
-                        <div className="space-y-1.5">
-                            <Label className="text-xs">Category</Label>
-                            <ChoiceRow
-                                value={category}
-                                onChange={setCategory}
-                                choices={CATEGORY_CHOICES}
-                            />
-                        </div>
-                        <div className="space-y-1.5">
-                            <Label className="text-xs">Priority</Label>
-                            <ChoiceRow
-                                value={priority}
-                                onChange={setPriority}
-                                choices={PRIORITY_CHOICES}
-                            />
-                        </div>
-                    </div>
-                    <div className="space-y-1.5 sm:col-span-2">
-                        <Label className="text-xs">Description</Label>
-                        <Textarea
-                            value={description}
-                            onChange={(e) => setDescription(e.target.value)}
-                            placeholder="Describe the issue, with any steps or context…"
-                            rows={6}
+                    ))}
+                    {coUsers.map((u) => (
+                        <RemovableChip
+                            key={`u-${u.id}`}
+                            label={u.name || u.email}
+                            onRemove={() =>
+                                setCoUsers((prev) => prev.filter((x) => x.id !== u.id))
+                            }
                         />
-                    </div>
-                    {requestType && (
-                        <div className="sm:col-span-2">
-                            <TicketCustomFields
-                                key={requestType.id}
-                                requestTypeId={requestType.id}
-                                onChange={setCustom}
-                                hideClientField={
-                                    user?.role === 'REQUESTER' && user?.external
-                                }
-                            />
-                        </div>
-                    )}
-                    <div className="space-y-1.5">
-                        <Label className="text-xs">Attachments</Label>
-                        <PendingFilePicker
-                            files={pendingFiles}
-                            onFiles={setPendingFiles}
-                            disabled={saving}
-                        />
-                    </div>
-                    <div className="space-y-1.5">
-                        <Label className="text-xs">Share with (optional)</Label>
-                        <div className="flex items-center gap-2">
-                            <RequesterPicker
-                                label="Add people / group"
-                                onConfirm={({ userIds, groupIds }) => {
-                                    setCoUserIds((prev) =>
-                                        Array.from(
-                                            new Set([...prev, ...userIds]),
-                                        ),
-                                    );
-                                    setCoGroupIds((prev) =>
-                                        Array.from(
-                                            new Set([...prev, ...groupIds]),
-                                        ),
-                                    );
-                                }}
-                            />
-                            {(coUserIds.length > 0 ||
-                                coGroupIds.length > 0) && (
-                                <span className="text-[11px] text-muted-foreground">
-                                    {coUserIds.length} people
-                                    {coGroupIds.length > 0
-                                        ? `, ${coGroupIds.length} group(s)`
-                                        : ''}{' '}
-                                    will be added
-                                    <button
-                                        type="button"
-                                        className="ml-2 underline-offset-2 hover:underline"
-                                        onClick={() => {
-                                            setCoUserIds([]);
-                                            setCoGroupIds([]);
-                                        }}
-                                    >
-                                        clear
-                                    </button>
-                                </span>
-                            )}
-                        </div>
-                    </div>
+                    ))}
                 </div>
-                <DialogFooter className="shrink-0">
+            )}
+        </div>
+    );
+    const attachCell = (
+        <div key="attach" className="min-w-0 space-y-1.5">
+            <FormLabel>Attachments</FormLabel>
+            <FileDropzone
+                files={pendingFiles}
+                onFiles={setPendingFiles}
+                disabled={saving}
+                inputRef={fileInputRef}
+            />
+        </div>
+    );
+
+    return (
+        <RaiseShell
+            open={!!requestType}
+            onOpenChange={onOpenChange}
+            title="Raise new ticket"
+            badge={
+                requestType && (
+                    <span
+                        className={cn(
+                            'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium',
+                            getTicketTypeChipClasses(requestType.color),
+                        )}
+                    >
+                        {TypeIcon && <TypeIcon className="h-3.5 w-3.5" />}
+                        {requestType.name}
+                    </span>
+                )
+            }
+            subtitle={
+                requestType?.description ||
+                'Create a new ticket to report an issue, ask a question or request something. Please provide as much detail as possible so we can help you faster.'
+            }
+            // The type's own help panel (tips, resources, on-call).
+            aside={<RaiseHelpCards help={requestType?.help} />}
+            footer={
+                <>
                     <Button
                         variant="outline"
                         onClick={() => onOpenChange(false)}
@@ -646,14 +634,80 @@ function RaiseRequestDialog({ requestType, onOpenChange, onCreated }) {
                     >
                         Cancel
                     </Button>
-                    <Button onClick={save} disabled={saving}>
-                        {saving && (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Button onClick={save} disabled={saving} className="gap-1.5">
+                        {saving ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                            <Send className="h-4 w-4" />
                         )}
-                        <Plus className="mr-1 h-4 w-4" /> Raise request
+                        Raise request
                     </Button>
-                </DialogFooter>
-            </DialogContent>
-        </Dialog>
+                </>
+            }
+        >
+            <div className="space-y-1.5">
+                <FormLabel required htmlFor="raise-title">
+                    Title
+                </FormLabel>
+                <IconInput
+                    id="raise-title"
+                    icon={FileText}
+                    value={subject}
+                    onChange={(e) => setSubject(e.target.value)}
+                    placeholder="Short title for your request…"
+                    maxLength={200}
+                    className={cn(tried && !subject.trim() && 'border-rose-400')}
+                />
+            </div>
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+                <div className="space-y-1.5">
+                    <FormLabel required>Category</FormLabel>
+                    <ChoiceCards
+                        label="Category"
+                        value={category}
+                        onChange={setCategory}
+                        choices={CATEGORY_CHOICES}
+                    />
+                </div>
+                <div className="space-y-1.5">
+                    <FormLabel required>Priority</FormLabel>
+                    <ChoiceCards
+                        label="Priority"
+                        value={priority}
+                        onChange={setPriority}
+                        choices={PRIORITY_CHOICES}
+                    />
+                </div>
+            </div>
+            <div className="space-y-1.5">
+                <FormLabel required>Description</FormLabel>
+                <DescriptionField
+                    onChange={({ html, isEmpty }) => {
+                        setDescHtml(html);
+                        setDescEmpty(isEmpty);
+                    }}
+                    onAttachClick={() => fileInputRef.current?.click()}
+                    onPasteFiles={(imgs) =>
+                        setPendingFiles((prev) => [...prev, ...imgs])
+                    }
+                    placeholder="Describe the issue, with any steps or context…"
+                    invalid={tried && descEmpty}
+                    disabled={saving}
+                />
+            </div>
+            {requestType && (
+                <TicketCustomFields
+                    key={requestType.id}
+                    requestTypeId={requestType.id}
+                    onChange={setCustom}
+                    hideClientField={
+                        user?.role === 'REQUESTER' && user?.external
+                    }
+                    labelClassName="text-sm font-medium"
+                    trailing={[shareCell, attachCell]}
+                />
+            )}
+        </RaiseShell>
     );
 }
+

@@ -5,18 +5,27 @@
 import { NavLink } from 'react-router-dom';
 
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/contexts/AuthContext';
+import { CAPABILITIES, hasCapability } from '@/lib/capabilities';
 
 const ADMIN_TABS = [
     { to: '/announcements', label: 'Announcements' },
     { to: '/templates', label: 'Templates' },
     { to: '/time-logging', label: 'Time logging' },
+    // Logs is restricted to super-admins (holders of the logs:view
+    // capability) — hidden from every other admin.
+    { to: '/logs', label: 'Logs', capability: CAPABILITIES.LOGS_VIEW },
     { to: '/billing', label: 'Billing' },
 ];
 
 export default function AdminTabs() {
+    const { user } = useAuth();
+    const tabs = ADMIN_TABS.filter(
+        (t) => !t.capability || hasCapability(user, t.capability),
+    );
     return (
         <div className="flex items-end gap-1.5 overflow-x-auto border-b bg-muted/30 px-3 pt-2 sm:px-6">
-            {ADMIN_TABS.map((t) => (
+            {tabs.map((t) => (
                 <NavLink
                     key={t.to}
                     to={t.to}

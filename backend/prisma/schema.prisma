@@ -1286,6 +1286,9 @@ enum NotificationType {
   // A ticket was taken / (re)assigned — sent to the requester ("X is now
   // handling your request") and to the newly assigned agent.
   TICKET_ASSIGNED
+  // A ticket went Pending / Resolved / Closed or was reopened — sent to the
+  // reporter and requester-side participants (lib/ticketStatusNotify).
+  TICKET_STATUS_CHANGED
   // Reminder to a `timeLogMandatory` user who is below the TimeLogPolicy
   // target for the current period ("Please fill your working log").
   TIME_LOG_REMINDER
@@ -1301,8 +1304,12 @@ model Notification {
   projectId String?
   actorId   String?
   meta      Json?
+  // Two-stage state: `seenAt` is stamped the moment the bell dropdown is
+  // opened (clears the badge count); `read` flips only when the user
+  // actually clicks the notification (clears the bold/highlight).
   read      Boolean          @default(false)
   readAt    DateTime?
+  seenAt    DateTime?
   createdAt DateTime         @default(now())
 
   user    User     @relation("UserNotifications", fields: [userId], references: [id], onDelete: Cascade)
@@ -1310,6 +1317,7 @@ model Notification {
   project Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
   @@index([userId, read, createdAt])
+  @@index([userId, seenAt])
   @@index([userId, createdAt])
 }
 
@@ -1359,6 +1367,9 @@ model PhaseTemplate {
 model CountryOption {
   id        String   @id @default(cuid())
   name      String   @unique
+  // 3-letter code used in project codes (P26-USA-0001). NULL = automatic
+  // (ISO 3166 alpha-3 for the name — lib/countryCodes.js).
+  code      String?
   order     Int      @default(0)
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
@@ -2063,6 +2074,28 @@ model TimeLogPolicy {
   updatedById    String?
 }
 
+// ----------------------------------------------------------------------------
+// LEGACY — no longer read. The old global "Raise-ticket help" (singleton).
+// Each ticket type now has its own help panel (TicketRequestType.tips /
+// resources / oncall*); migration 20261002020000_ticket_type_help copied
+// this row onto every type. Kept so no data is dropped.
+model TicketHelpSettings {
+  id             String   @id @default("singleton")
+  resourcesIntro String?
+  // [{ title, url }] — e.g. "IPS Troubleshooting Guide" → https://…
+  resources      Json?
+  oncallText     String?
+  oncallLabel    String?
+  // A phone number, an e-mail address or an http(s) link.
+  oncallContact  String?
+  // Default "Tips for a good ticket" — JSON array of strings. Null = never
+  // set (the form shows its built-in tips); [] = no default tips. A ticket
+  // type's own tips (TicketRequestType.tips) replace these.
+  tips           Json?
+  updatedAt      DateTime @updatedAt
+  updatedById    String?
+}
+
 // ============================================================================
 // Broadcast announcements
 // ----------------------------------------------------------------------------
@@ -2125,6 +2158,26 @@ model AnnouncementAck {
 
   @@unique([announcementId, userId])
   @@index([userId])
+}
+
+// Authentication audit trail. One row per login ATTEMPT — success, failure
+// (wrong password / unknown email) or blocked (pending / suspended). Lets
+// admins answer "did user X try to sign in, and what happened?" and spot
+// brute-force bursts. No FK to User on purpose: attempts with an unknown
+// email have no user, and we want the row to survive user deletion.
+model AuthEvent {
+  id        String   @id @default(cuid())
+  email     String?
+  userId    String?
+  type      String   // LOGIN_SUCCESS | LOGIN_FAILED | LOGIN_BLOCKED
+  reason    String?  // ok | wrong_password | unknown_email | pending | suspended
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([type, createdAt])
+  @@index([createdAt])
 }
 
 // ============================================================================
@@ -2423,6 +2476,12 @@ model Ticket {
   closedBy   User?    @relation("TicketClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
   closedAt   DateTime?
 
+  // Auto-close: an agent resolving a ticket can have it close by itself
+  // N days later (autoCloseDays, when → autoCloseAt). Any other status
+  // or a requester reply clears it. Swept by lib/ticketAutoClose.js.
+  autoCloseAt   DateTime?
+  autoCloseDays Int?
+
   // Soft delete: deleting a ticket stamps `deletedAt` (auditable +
   // restorable from the activity feed) instead of physically removing it.
   // The Prisma client extension auto-filters deletedAt=null on every read
@@ -2455,6 +2514,7 @@ model Ticket {
   @@index([terminalModelId])
   @@index([createdAt])
   @@index([deletedAt])
+  @@index([status, autoCloseAt])
 }
 
 model TicketMessage {
@@ -2483,6 +2543,9 @@ enum TicketEventKind {
   ASSIGNED
   UNASSIGNED
   REOPENED
+  // Resolved → Closed by the auto-close sweep (no actor). fromValue = the
+  // number of days it waited, toValue = 'CLOSED'.
+  AUTO_CLOSED
 }
 
 // Admin-defined request type shown as a card on the requester portal.
@@ -2505,6 +2568,18 @@ model TicketRequestType {
   project         Project?        @relation("ProjectTicketRequestTypes", fields: [projectId], references: [id], onDelete: SetNull)
   // Optional default priority pre-selected on the form.
   defaultPriority TicketPriority?
+  // Help panel next to this type's raise form (see lib/ticketHelp.js).
+  // "Tips for a good ticket": JSON array of strings. Null = the form's
+  // built-in tips, [] = no Tips card.
+  tips            Json?
+  // "Related resources": intro text + [{ title, url }] links.
+  resourcesIntro  String?
+  resources       Json?
+  // "Need urgent help?": text, button label and a phone number, e-mail
+  // address or http(s) link. No contact = no card.
+  oncallText      String?
+  oncallLabel     String?
+  oncallContact   String?
   active          Boolean         @default(true)
   position        Int             @default(0)
   createdById     String?

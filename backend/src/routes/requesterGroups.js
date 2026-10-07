@@ -14,6 +14,10 @@ const prisma = require('../lib/prisma');
 const { requireAuth } = require('../middleware/auth');
 const { httpError } = require('../middleware/error');
 const { isAdmin } = require('../lib/permissions');
+const {
+    canManageTickets,
+    participantCandidateWhere,
+} = require('../lib/ticketAccess');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -55,12 +59,14 @@ async function validUserIds(ids) {
     return users.map((u) => u.id);
 }
 
-// Pickable people for the "add co-requester" UI on the portal. Readable
-// by any signed-in user (requesters need it). Minimal fields only.
+// Pickable people for the "add co-requester" UI on the portal. Minimal
+// fields only, and only people the caller may add: staff see everyone,
+// internal requesters see staff + internal requesters, external
+// requesters (customers) only colleagues of their own organisation.
 router.get('/candidates', async (req, res, next) => {
     try {
         const users = await prisma.user.findMany({
-            where: { status: 'ACTIVE' },
+            where: participantCandidateWhere(req),
             select: { id: true, name: true, email: true, avatarUrl: true },
             orderBy: { name: 'asc' },
         });
@@ -72,10 +78,27 @@ router.get('/candidates', async (req, res, next) => {
 
 router.get('/', async (req, res, next) => {
     try {
-        const groups = await prisma.requesterGroup.findMany({
+        let groups = await prisma.requesterGroup.findMany({
             include: GROUP_INCLUDE,
             orderBy: { name: 'asc' },
         });
+        // Requesters only see groups made entirely of people they could
+        // add one by one (customers: their own organisation).
+        if (!canManageTickets(req)) {
+            const allowed = new Set(
+                (
+                    await prisma.user.findMany({
+                        where: participantCandidateWhere(req),
+                        select: { id: true },
+                    })
+                ).map((u) => u.id),
+            );
+            groups = groups.filter(
+                (g) =>
+                    g.members.length > 0 &&
+                    g.members.every((m) => allowed.has(m.userId)),
+            );
+        }
         res.json({ groups: groups.map(serialize) });
     } catch (err) {
         next(err);

@@ -41,6 +41,9 @@ import {
     AlignCenter,
     AlignRight,
     Link2,
+    ChevronDown,
+    Smile,
+    Paperclip,
 } from 'lucide-react';
 
 import { cn, resolveAssetUrl } from '@/lib/utils';
@@ -52,6 +55,12 @@ const ALLOWED_TAGS = new Set([
     'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL',
     'P', 'DIV', 'BR', 'SPAN', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'A',
     'H1', 'H2', 'H3', 'CODE', 'PRE', 'IMG',
+]);
+
+// Never kept, not even their text (mirrors the server's nonTextTags).
+const DROP_WITH_CONTENT = new Set([
+    'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA', 'IFRAME',
+    'OBJECT', 'EMBED',
 ]);
 
 const SAFE_HREF = /^(https?:|mailto:)/i;
@@ -135,6 +144,9 @@ export function sanitizeHtml(html) {
             }
             if (child.nodeType !== 1 /* element */) return;
             const tag = child.tagName;
+            // Drop these with their contents (a stray <script> must not
+            // leave its code behind as visible text).
+            if (DROP_WITH_CONTENT.has(tag)) return;
             if (ALLOWED_TAGS.has(tag)) {
                 const el = document.createElement(tag);
                 if (tag === 'A') {
@@ -293,6 +305,44 @@ const TOOLS = [
     { kind: 'clear', Icon: Eraser, label: 'Clear formatting' },
 ];
 
+// Compact layout (ticket composer): a "Normal text ▾" style picker
+// replaces the H1/H2 buttons, then B / I / U, lists, link, code, emoji
+// and attach.
+const COMPACT_TOOLS = [
+    { kind: 'cmd', cmd: 'bold', Icon: Bold, label: 'Bold' },
+    { kind: 'cmd', cmd: 'italic', Icon: Italic, label: 'Italic' },
+    { kind: 'cmd', cmd: 'underline', Icon: Underline, label: 'Underline' },
+    { kind: 'sep' },
+    {
+        kind: 'cmd',
+        cmd: 'insertUnorderedList',
+        Icon: List,
+        label: 'Bullet list',
+    },
+    {
+        kind: 'cmd',
+        cmd: 'insertOrderedList',
+        Icon: ListOrdered,
+        label: 'Numbered list',
+    },
+];
+const CODE_TOOL = { kind: 'code', Icon: Code, label: 'Inline code' };
+
+const BLOCK_OPTIONS = [
+    { value: 'p', label: 'Normal text', arg: '<p>', className: 'text-sm' },
+    { value: 'h1', label: 'Heading 1', arg: '<h1>', className: 'text-base font-bold' },
+    { value: 'h2', label: 'Heading 2', arg: '<h2>', className: 'text-sm font-semibold' },
+    { value: 'blockquote', label: 'Quote', arg: '<blockquote>', className: 'text-sm italic' },
+];
+
+const EMOJIS = [
+    '😀', '😄', '😊', '🙂', '😉', '😍', '🤔', '😅',
+    '😂', '😢', '😮', '😎', '🙏', '👍', '👎', '👌',
+    '👏', '🙌', '💪', '👋', '🎉', '✅', '❌', '⚠️',
+    '❗', '❓', '🔥', '⭐', '💡', '📌', '📎', '📞',
+    '📧', '🕐', '🚀', '🛠️', '🐞', '💳', '📱', '💻',
+];
+
 export const RichTextEditor = forwardRef(function RichTextEditor(
     {
         onChange,
@@ -315,11 +365,42 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
         // async (file) => url. When provided, an "upload image" button
         // appears alongside the "image from URL" one.
         onImageUpload = null,
+        // Compact toolbar layout (ticket composer) — see COMPACT_TOOLS.
+        compact = false,
+        // Emoji picker button.
+        enableEmoji = false,
+        // () => void — shows a paperclip button (the parent owns the files).
+        onAttachClick = null,
+        // No outer border / rounding — for embedding inside a card.
+        bare = false,
+        // Extra classes for the editable area (e.g. a taller min-height).
+        editorClassName,
+        // Node shown at the right end of the toolbar (e.g. a Preview toggle).
+        toolbarExtra = null,
+        // When set, shown in place of the editable area (which stays mounted
+        // — hidden — so nothing typed is lost), e.g. a formatted preview.
+        overlay = null,
     },
     ref,
 ) {
     const elRef = useRef(null);
     const fileInputRef = useRef(null);
+    const toolbarRef = useRef(null);
+    const [blockOpen, setBlockOpen] = useState(false);
+    const [blockValue, setBlockValue] = useState('p');
+    const [emojiOpen, setEmojiOpen] = useState(false);
+    // Close the style / emoji pickers on any click outside the toolbar.
+    useEffect(() => {
+        if (!blockOpen && !emojiOpen) return undefined;
+        const onDown = (e) => {
+            if (!toolbarRef.current?.contains(e.target)) {
+                setBlockOpen(false);
+                setEmojiOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDown);
+        return () => document.removeEventListener('mousedown', onDown);
+    }, [blockOpen, emojiOpen]);
     const [uploading, setUploading] = useState(false);
     // Upload progress (0–100) while an image is being sent; null when idle.
     const [uploadPct, setUploadPct] = useState(null);
@@ -369,6 +450,23 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
             focus() {
                 elRef.current?.focus();
             },
+            // Append HTML at the END of the content (e.g. "Quote in reply"),
+            // regardless of where the caret was.
+            appendHtml(html) {
+                const el = elRef.current;
+                if (!el) return;
+                el.focus();
+                const sel = window.getSelection?.();
+                if (sel) {
+                    const range = document.createRange();
+                    range.selectNodeContents(el);
+                    range.collapse(false);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                }
+                document.execCommand('insertHTML', false, html);
+                emit();
+            },
         }),
         [emit],
     );
@@ -377,6 +475,35 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
         elRef.current?.focus();
         document.execCommand('insertHTML', false, html);
         emit();
+    };
+
+    // Paragraph / heading / quote for the current block (compact bar).
+    const applyBlock = (opt) => {
+        if (disabled) return;
+        elRef.current?.focus();
+        document.execCommand('formatBlock', false, opt.arg);
+        setBlockValue(opt.value);
+        setBlockOpen(false);
+        emit();
+    };
+    // Reflect the caret's block type in the "Normal text ▾" label.
+    const syncBlock = () => {
+        if (!compact) return;
+        try {
+            const v = String(
+                document.queryCommandValue('formatBlock') || '',
+            ).toLowerCase();
+            setBlockValue(
+                BLOCK_OPTIONS.some((o) => o.value === v) ? v : 'p',
+            );
+        } catch {
+            /* queryCommandValue unsupported — keep the last label */
+        }
+    };
+    const insertEmoji = (emo) => {
+        if (disabled) return;
+        insertHtml(escapeText(emo));
+        setEmojiOpen(false);
     };
 
     const apply = (tool) => {
@@ -695,10 +822,221 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
         emit();
     };
 
+    // ---- Toolbar pieces (shared by the full and the compact layout) ----
+    const toolBtnCls =
+        'flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground';
+    const sep = (key) => (
+        <span key={key} className="mx-0.5 h-5 w-px bg-border" />
+    );
+    const renderTool = (t, i) => {
+        if (t.kind === 'sep') return sep(`sep-${i}`);
+        const Icon = t.Icon;
+        return (
+            <button
+                key={t.label}
+                type="button"
+                title={t.label}
+                aria-label={t.label}
+                // Keep the editor's selection on mousedown so the
+                // command applies to what the user highlighted.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => apply(t)}
+                className={toolBtnCls}
+            >
+                <Icon className="h-3.5 w-3.5" />
+            </button>
+        );
+    };
+    const quoteBtn = enableQuote ? (
+        <button
+            type="button"
+            title="Quote"
+            aria-label="Quote"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={applyQuote}
+            className={toolBtnCls}
+        >
+            <Quote className="h-3.5 w-3.5" />
+        </button>
+    ) : null;
+    const linkBtn = enableLink ? (
+        <button
+            type="button"
+            title="Insert link"
+            aria-label="Insert link"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={insertLink}
+            className={toolBtnCls}
+        >
+            <LinkIcon className="h-3.5 w-3.5" />
+        </button>
+    ) : null;
+    const uploadBtn =
+        enableImage && onImageUpload ? (
+            <button
+                type="button"
+                title="Upload image"
+                aria-label="Upload image"
+                disabled={uploading}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => fileInputRef.current?.click()}
+                className={cn(toolBtnCls, 'disabled:opacity-50')}
+            >
+                <ImagePlus className="h-3.5 w-3.5" />
+            </button>
+        ) : null;
+    const imageUrlBtn = enableImage ? (
+        <button
+            type="button"
+            title="Image from URL"
+            aria-label="Image from URL"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={insertImage}
+            className={toolBtnCls}
+        >
+            <ImageIcon className="h-3.5 w-3.5" />
+        </button>
+    ) : null;
+    const alignBtns = enableAlign ? (
+        <>
+            {sep('sep-align')}
+            {[
+                { cmd: 'justifyLeft', Icon: AlignLeft, label: 'Align left' },
+                { cmd: 'justifyCenter', Icon: AlignCenter, label: 'Align center' },
+                { cmd: 'justifyRight', Icon: AlignRight, label: 'Align right' },
+            ].map(({ cmd, Icon, label }) => (
+                <button
+                    key={cmd}
+                    type="button"
+                    title={label}
+                    aria-label={label}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => applyAlign(cmd)}
+                    className={toolBtnCls}
+                >
+                    <Icon className="h-3.5 w-3.5" />
+                </button>
+            ))}
+        </>
+    ) : null;
+    const sizeBtns = enableSize ? (
+        <span className="flex items-center gap-0.5">
+            {[
+                { t: 'sm', label: 'Small text', cls: 'text-[10px]' },
+                { t: 'lg', label: 'Large text', cls: 'text-sm' },
+                { t: 'xl', label: 'X-large text', cls: 'text-base' },
+            ].map((s) => (
+                <button
+                    key={s.t}
+                    type="button"
+                    title={`${s.label} (select text first)`}
+                    aria-label={s.label}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => applySize(s.t)}
+                    className={cn(
+                        'flex h-7 min-w-[1.75rem] items-center justify-center rounded px-1 font-semibold leading-none text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+                        s.cls,
+                    )}
+                >
+                    A
+                </button>
+            ))}
+        </span>
+    ) : null;
+    // "Normal text ▾" — paragraph / heading / quote picker (compact bar).
+    const blockMenu = (
+        <span className="relative">
+            <button
+                type="button"
+                title="Text style"
+                aria-label="Text style"
+                aria-expanded={blockOpen}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                    setEmojiOpen(false);
+                    setBlockOpen((o) => !o);
+                }}
+                className={cn(
+                    'flex h-7 items-center gap-1 rounded px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+                    blockOpen && 'bg-accent text-foreground',
+                )}
+            >
+                {BLOCK_OPTIONS.find((o) => o.value === blockValue)?.label ||
+                    'Normal text'}
+                <ChevronDown className="h-3 w-3 opacity-60" />
+            </button>
+            {blockOpen && (
+                <div className="absolute bottom-full left-0 z-50 mb-1 w-40 rounded-md border bg-popover p-1 shadow-md">
+                    {BLOCK_OPTIONS.map((o) => (
+                        <button
+                            key={o.value}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => applyBlock(o)}
+                            className={cn(
+                                'flex w-full items-center rounded px-2 py-1.5 text-left hover:bg-accent',
+                                o.className,
+                                blockValue === o.value && 'bg-accent',
+                            )}
+                        >
+                            {o.label}
+                        </button>
+                    ))}
+                </div>
+            )}
+        </span>
+    );
+    const emojiBtn = enableEmoji ? (
+        <span className="relative">
+            <button
+                type="button"
+                title="Emoji"
+                aria-label="Insert emoji"
+                aria-expanded={emojiOpen}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                    setBlockOpen(false);
+                    setEmojiOpen((o) => !o);
+                }}
+                className={cn(toolBtnCls, emojiOpen && 'bg-accent text-foreground')}
+            >
+                <Smile className="h-3.5 w-3.5" />
+            </button>
+            {emojiOpen && (
+                <div className="absolute bottom-full left-0 z-50 mb-1 grid w-60 grid-cols-8 gap-0.5 rounded-md border bg-popover p-1.5 shadow-md">
+                    {EMOJIS.map((emo) => (
+                        <button
+                            key={emo}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => insertEmoji(emo)}
+                            className="flex h-7 w-7 items-center justify-center rounded text-base hover:bg-accent"
+                        >
+                            {emo}
+                        </button>
+                    ))}
+                </div>
+            )}
+        </span>
+    ) : null;
+    const attachBtn = onAttachClick ? (
+        <button
+            type="button"
+            title="Attach file"
+            aria-label="Attach file"
+            disabled={disabled}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onAttachClick()}
+            className={cn(toolBtnCls, 'disabled:opacity-50')}
+        >
+            <Paperclip className="h-3.5 w-3.5" />
+        </button>
+    ) : null;
     return (
         <div
             className={cn(
-                'flex flex-col rounded-md border bg-background',
+                'flex flex-col bg-background',
+                !bare && 'rounded-md border',
                 disabled && 'opacity-60',
                 className,
             )}
@@ -710,130 +1048,42 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
                 className="hidden"
                 onChange={onFilePicked}
             />
-            <div className="flex flex-wrap items-center gap-0.5 border-b px-1 py-1">
-                {TOOLS.map((t, i) => {
-                    if (t.kind === 'sep') {
-                        return (
-                            <span
-                                key={`sep-${i}`}
-                                className="mx-0.5 h-5 w-px bg-border"
-                            />
-                        );
-                    }
-                    const Icon = t.Icon;
-                    return (
-                        <button
-                            key={t.label}
-                            type="button"
-                            title={t.label}
-                            aria-label={t.label}
-                            // Keep the editor's selection on mousedown so the
-                            // command applies to what the user highlighted.
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => apply(t)}
-                            className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                        >
-                            <Icon className="h-3.5 w-3.5" />
-                        </button>
-                    );
-                })}
-                {(enableQuote || enableLink || enableImage || enableSize) && (
-                    <span className="mx-0.5 h-5 w-px bg-border" />
+            <div
+                ref={toolbarRef}
+                className={cn(
+                    'flex flex-wrap items-center gap-0.5 border-b px-1 py-1',
+                    compact && 'gap-1 px-2 py-1.5',
                 )}
-                {enableQuote && (
-                    <button
-                        type="button"
-                        title="Quote"
-                        aria-label="Quote"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={applyQuote}
-                        className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    >
-                        <Quote className="h-3.5 w-3.5" />
-                    </button>
-                )}
-                {enableLink && (
-                    <button
-                        type="button"
-                        title="Insert link"
-                        aria-label="Insert link"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={insertLink}
-                        className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    >
-                        <LinkIcon className="h-3.5 w-3.5" />
-                    </button>
-                )}
-                {enableImage && onImageUpload && (
-                    <button
-                        type="button"
-                        title="Upload image"
-                        aria-label="Upload image"
-                        disabled={uploading}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => fileInputRef.current?.click()}
-                        className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-                    >
-                        <ImagePlus className="h-3.5 w-3.5" />
-                    </button>
-                )}
-                {enableImage && (
-                    <button
-                        type="button"
-                        title="Image from URL"
-                        aria-label="Image from URL"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={insertImage}
-                        className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    >
-                        <ImageIcon className="h-3.5 w-3.5" />
-                    </button>
-                )}
-                {enableAlign && (
+            >
+                {compact ? (
                     <>
-                        <span className="mx-0.5 h-5 w-px bg-border" />
-                        {[
-                            { cmd: 'justifyLeft', Icon: AlignLeft, label: 'Align left' },
-                            { cmd: 'justifyCenter', Icon: AlignCenter, label: 'Align center' },
-                            { cmd: 'justifyRight', Icon: AlignRight, label: 'Align right' },
-                        ].map(({ cmd, Icon, label }) => (
-                            <button
-                                key={cmd}
-                                type="button"
-                                title={label}
-                                aria-label={label}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => applyAlign(cmd)}
-                                className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                            >
-                                <Icon className="h-3.5 w-3.5" />
-                            </button>
-                        ))}
+                        {blockMenu}
+                        {sep('sep-block')}
+                        {COMPACT_TOOLS.map(renderTool)}
+                        {sep('sep-insert')}
+                        {linkBtn}
+                        {renderTool(CODE_TOOL, 'code')}
+                        {emojiBtn}
+                        {attachBtn}
                     </>
-                )}
-                {enableSize && (
-                    <span className="flex items-center gap-0.5">
-                        {[
-                            { t: 'sm', label: 'Small text', cls: 'text-[10px]' },
-                            { t: 'lg', label: 'Large text', cls: 'text-sm' },
-                            { t: 'xl', label: 'X-large text', cls: 'text-base' },
-                        ].map((s) => (
-                            <button
-                                key={s.t}
-                                type="button"
-                                title={`${s.label} (select text first)`}
-                                aria-label={s.label}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => applySize(s.t)}
-                                className={cn(
-                                    'flex h-7 min-w-[1.75rem] items-center justify-center rounded px-1 font-semibold leading-none text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
-                                    s.cls,
-                                )}
-                            >
-                                A
-                            </button>
-                        ))}
-                    </span>
+                ) : (
+                    <>
+                        {TOOLS.map(renderTool)}
+                        {(enableQuote ||
+                            enableLink ||
+                            enableImage ||
+                            enableSize) &&
+                            sep('sep-extra')}
+                        {quoteBtn}
+                        {linkBtn}
+                        {uploadBtn}
+                        {imageUrlBtn}
+                        {alignBtns}
+                        {sizeBtns}
+                        {(emojiBtn || attachBtn) && sep('sep-more')}
+                        {emojiBtn}
+                        {attachBtn}
+                    </>
                 )}
                 {mentions.length > 0 && (
                     <span className="relative">
@@ -934,6 +1184,11 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
                         )}
                     </span>
                 )}
+                {toolbarExtra && (
+                    <span className="ml-auto flex items-center">
+                        {toolbarExtra}
+                    </span>
+                )}
             </div>
             {uploadPct != null && (
                 <div
@@ -967,7 +1222,11 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
                         clearImage();
                     }
                 }}
-                onKeyUp={detectInline}
+                onKeyUp={() => {
+                    detectInline();
+                    syncBlock();
+                }}
+                onMouseUp={syncBlock}
                 onClick={(e) => {
                     const t = e.target;
                     if (t && t.tagName === 'IMG') selectImage(t);
@@ -1016,9 +1275,22 @@ export const RichTextEditor = forwardRef(function RichTextEditor(
                 className={cn(
                     'max-h-48 min-h-[60px] overflow-y-auto px-3 py-2 text-sm outline-none',
                     RICH_CLASSES,
+                    editorClassName,
                     'empty:before:pointer-events-none empty:before:text-muted-foreground empty:before:content-[attr(data-placeholder)]',
+                    overlay != null && 'hidden',
                 )}
             />
+            {overlay != null && (
+                <div
+                    className={cn(
+                        'max-h-48 min-h-[60px] overflow-y-auto px-3 py-2 text-sm',
+                        editorClassName,
+                    )}
+                    data-editor-overlay=""
+                >
+                    {overlay}
+                </div>
+            )}
             {inlineRef && inlineMatches.length > 0 && (
                 <div
                     style={{

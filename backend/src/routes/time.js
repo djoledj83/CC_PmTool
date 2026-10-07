@@ -1190,7 +1190,20 @@ router.get('/stats', async (req, res, next) => {
         const where = {
             startedAt: { gte: fromDate, lte: toDate },
         };
-        if (projectId) where.projectId = String(projectId);
+        // Project scope: the Charts tab sends a multi-select `projectIds`
+        // comma list; a single `projectId` is still honoured for legacy
+        // deep-links and other callers. The list wins when both appear.
+        // (`parseTaskIdsParam` is a generic comma/array id normaliser.)
+        const filterProjectIds = parseTaskIdsParam(req.query.projectIds);
+        if (filterProjectIds) {
+            where.projectId =
+                filterProjectIds.length === 1
+                    ? filterProjectIds[0]
+                    : { in: filterProjectIds };
+        } else if (projectId) {
+            where.projectId = String(projectId);
+        }
+        // Client / application / product FK filters (admin-only, additive).
         await applyClientApplicationProjectFilter(where, req.query, req);
         // Optional multi-task filter — same shape as the listing
         // endpoint. The user picks N tasks from a multi-select
@@ -1217,6 +1230,7 @@ router.get('/stats', async (req, res, next) => {
                     byType: [],
                     byClient: [],
                     byApplication: [],
+                    byProduct: [],
                     byUser: [],
                     total: 0,
                     range: { from: fromDate, to: toDate },
@@ -1237,6 +1251,7 @@ router.get('/stats', async (req, res, next) => {
                     byType: [],
                     byClient: [],
                     byApplication: [],
+                    byProduct: [],
                     byUser: [],
                     total: 0,
                     range: { from: fromDate, to: toDate },
@@ -1336,8 +1351,10 @@ router.get('/stats', async (req, res, next) => {
                           client: true,
                           clientId: true,
                           applicationId: true,
+                          productId: true,
                           clientRecord: { select: { id: true, name: true } },
                           application: { select: { id: true, name: true } },
+                          product: { select: { id: true, name: true } },
                           projectType: { select: { id: true, name: true } },
                       },
                   })
@@ -1357,7 +1374,7 @@ router.get('/stats', async (req, res, next) => {
         const projectsById = new Map(projects.map((p) => [p.id, p]));
         const usersById = new Map(users.map((u) => [u.id, u]));
 
-        const byProject = Array.from(projectMap.entries())
+        const byProjectRanked = Array.from(projectMap.entries())
             .map(([id, seconds]) => {
                 const p = projectsById.get(id);
                 return {
@@ -1367,8 +1384,13 @@ router.get('/stats', async (req, res, next) => {
                     seconds,
                 };
             })
-            .sort((a, b) => b.seconds - a.seconds)
-            .slice(0, 10);
+            .sort((a, b) => b.seconds - a.seconds);
+        const byProject = byProjectRanked.slice(0, 10);
+        // The tail beyond the top-N, so the frontend can reveal what's
+        // rolled into the "Other" slice (name + seconds only).
+        const byProjectOther = byProjectRanked
+            .slice(10)
+            .map((p) => ({ name: p.name, seconds: p.seconds }));
 
         const typeMap = new Map();
         for (const [pid, seconds] of projectMap) {
@@ -1390,6 +1412,7 @@ router.get('/stats', async (req, res, next) => {
 
         const clientMap = new Map();
         const applicationMap = new Map();
+        const productMap = new Map();
         for (const [pid, seconds] of projectMap) {
             const p = projectsById.get(pid);
             const clientKey =
@@ -1415,15 +1438,30 @@ router.get('/stats', async (req, res, next) => {
             appCur.seconds += seconds;
             appCur.name = appName;
             applicationMap.set(appKey, appCur);
+
+            // byProduct — the current project↔catalogue link, mirroring
+            // byApplication (which is the legacy link).
+            const productKey = p?.productId || '__none__';
+            const productName = p?.product?.name || 'No product';
+            const productCur = productMap.get(productKey) || {
+                name: productName,
+                seconds: 0,
+            };
+            productCur.seconds += seconds;
+            productCur.name = productName;
+            productMap.set(productKey, productCur);
         }
-        const byClient = Array.from(clientMap.entries())
+        const byClientRanked = Array.from(clientMap.entries())
             .map(([clientId, v]) => ({
                 clientId: clientId.startsWith('name:') ? null : clientId,
                 name: v.name,
                 seconds: v.seconds,
             }))
-            .sort((a, b) => b.seconds - a.seconds)
-            .slice(0, 15);
+            .sort((a, b) => b.seconds - a.seconds);
+        const byClient = byClientRanked.slice(0, 15);
+        const byClientOther = byClientRanked
+            .slice(15)
+            .map((c) => ({ name: c.name, seconds: c.seconds }));
         const byApplication = Array.from(applicationMap.entries())
             .map(([applicationId, v]) => ({
                 applicationId:
@@ -1433,6 +1471,17 @@ router.get('/stats', async (req, res, next) => {
             }))
             .sort((a, b) => b.seconds - a.seconds)
             .slice(0, 15);
+        const byProductRanked = Array.from(productMap.entries())
+            .map(([productId, v]) => ({
+                productId: productId === '__none__' ? null : productId,
+                name: v.name,
+                seconds: v.seconds,
+            }))
+            .sort((a, b) => b.seconds - a.seconds);
+        const byProduct = byProductRanked.slice(0, 15);
+        const byProductOther = byProductRanked
+            .slice(15)
+            .map((p) => ({ name: p.name, seconds: p.seconds }));
 
         const byUser = Array.from(userMap.entries())
             .map(([id, seconds]) => {
@@ -1468,6 +1517,10 @@ router.get('/stats', async (req, res, next) => {
             byType,
             byClient,
             byApplication,
+            byProduct,
+            byProjectOther,
+            byClientOther,
+            byProductOther,
             byUser,
             total,
             entryCount: entries.length,

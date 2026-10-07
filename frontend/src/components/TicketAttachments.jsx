@@ -13,7 +13,7 @@ import { toast } from 'sonner';
 import { Paperclip, Download, X, Loader2 } from 'lucide-react';
 
 import { api } from '@/lib/api';
-import { resolveAssetUrl } from '@/lib/utils';
+import { cn, resolveAssetUrl } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 
 // Image attachments get an inline thumbnail + click-to-zoom lightbox;
@@ -254,8 +254,14 @@ export function PendingFilePicker({
     onFiles,
     disabled = false,
     label = 'Attach file',
+    // Optional external ref to the hidden <input type=file>, so a parent
+    // can open the picker from its own button (e.g. a toolbar paperclip).
+    inputRef: externalInputRef = null,
+    // Hide the built-in button (the parent renders its own trigger).
+    showButton = true,
 }) {
-    const inputRef = useRef(null);
+    const localInputRef = useRef(null);
+    const inputRef = externalInputRef || localInputRef;
     const [preview, setPreview] = useState(null);
     // Object URLs so pasted/picked images get an inline thumbnail before
     // they're uploaded. Revoked when the file set changes / unmounts.
@@ -282,18 +288,20 @@ export function PendingFilePicker({
     };
     const removeAt = (i) => onFiles(files.filter((_, idx) => idx !== i));
     return (
-        <div className="space-y-1.5">
-            <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 gap-1.5 px-2 text-xs"
-                onClick={() => inputRef.current?.click()}
-                disabled={disabled}
-            >
-                <Paperclip className="h-3.5 w-3.5" />
-                {label}
-            </Button>
+        <div className={cn('space-y-1.5', !showButton && files.length === 0 && 'hidden')}>
+            {showButton && (
+                <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1.5 px-2 text-xs"
+                    onClick={() => inputRef.current?.click()}
+                    disabled={disabled}
+                >
+                    <Paperclip className="h-3.5 w-3.5" />
+                    {label}
+                </Button>
+            )}
             <input
                 ref={inputRef}
                 type="file"
@@ -367,6 +375,8 @@ export function TicketAttachments({
     canManage = false,
     canUpload = true,
     onChanged,
+    // Optional custom section title (node) — replaces the plain heading.
+    heading = null,
 }) {
     const inputRef = useRef(null);
     const [uploading, setUploading] = useState(false);
@@ -392,10 +402,12 @@ export function TicketAttachments({
 
     return (
         <div className="space-y-2">
-            <div className="flex items-center justify-between">
-                <h3 className="text-sm font-medium text-muted-foreground">
-                    Attachments
-                </h3>
+            <div className="flex items-center justify-between gap-2">
+                {heading || (
+                    <h3 className="text-sm font-medium text-muted-foreground">
+                        Attachments
+                    </h3>
+                )}
                 {canUpload && (
                     <>
                         <Button

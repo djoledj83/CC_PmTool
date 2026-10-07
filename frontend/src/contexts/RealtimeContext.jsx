@@ -30,6 +30,10 @@ export function RealtimeProvider({ children }) {
     const [socket, setSocket] = useState(null);
     const [presence, setPresence] = useState(() => new Set());
     const [unreadNotifications, setUnreadNotifications] = useState(0);
+    // Badge count: notifications that arrived since the bell was last
+    // opened. Distinct from `unreadNotifications` (never clicked), which
+    // only drives the bold styling inside the dropdown.
+    const [unseenNotifications, setUnseenNotifications] = useState(0);
     const [unreadMessages, setUnreadMessages] = useState(0);
     const [recentNotifications, setRecentNotifications] = useState([]);
     const [pendingUserCount, setPendingUserCount] = useState(0);
@@ -50,6 +54,9 @@ export function RealtimeProvider({ children }) {
     }, [chatSoundId]);
 
     const isAdmin = user?.role === 'ADMIN';
+    // Requesters (the portal) only have notifications — no chat, to-dos or
+    // approvals, and the server refuses those endpoints for them.
+    const isRequester = user?.role === 'REQUESTER';
 
     const setChatMuted = useCallback((nextOrUpdater) => {
         setChatMutedState((prev) => {
@@ -125,8 +132,27 @@ export function RealtimeProvider({ children }) {
     const refreshCounts = useCallback(async () => {
         if (!user) {
             setUnreadNotifications(0);
+            setUnseenNotifications(0);
             setUnreadMessages(0);
             setRecentNotifications([]);
+            setPendingUserCount(0);
+            setTodoAlertCount(0);
+            setPendingReassignmentCount(0);
+            return;
+        }
+        if (isRequester) {
+            try {
+                const [n, recent] = await Promise.all([
+                    api.get('/notifications/unread-count'),
+                    api.get('/notifications', { params: { limit: 20 } }),
+                ]);
+                setUnreadNotifications(n.data.unread || 0);
+                setUnseenNotifications(n.data.unseen ?? n.data.unread ?? 0);
+                setRecentNotifications(recent.data.notifications || []);
+            } catch {
+                // ignore — the bell shows 0 until the next refresh
+            }
+            setUnreadMessages(0);
             setPendingUserCount(0);
             setTodoAlertCount(0);
             setPendingReassignmentCount(0);
@@ -140,6 +166,8 @@ export function RealtimeProvider({ children }) {
                 api.get('/todos/summary'),
             ]);
             setUnreadNotifications(n.data.unread || 0);
+            // Older backends don't return `unseen` — fall back to unread.
+            setUnseenNotifications(n.data.unseen ?? n.data.unread ?? 0);
             setUnreadMessages(m.data.unread || 0);
             setRecentNotifications(recent.data.notifications || []);
             setTodoAlertCount(todos.data.counts?.alert || 0);
@@ -165,7 +193,7 @@ export function RealtimeProvider({ children }) {
         } catch {
             setPendingReassignmentCount(0);
         }
-    }, [user, isAdmin]);
+    }, [user, isAdmin, isRequester]);
 
     useEffect(() => {
         if (!user) {
@@ -192,6 +220,18 @@ export function RealtimeProvider({ children }) {
         });
         sock.io.on('reconnect', () => {
             refreshCounts();
+        });
+
+        // The server drops a user's sockets when their account changes
+        // (role, organisation, suspension). socket.io doesn't retry after
+        // a server-side disconnect, so reconnect ourselves — the server
+        // then puts us in the right rooms (or refuses a suspended user).
+        sock.on('disconnect', (reason) => {
+            if (reason !== 'io server disconnect') return;
+            setTimeout(() => {
+                sock.auth = { token: getAccessToken() || token };
+                sock.connect();
+            }, 1500);
         });
 
         sock.on('connect_error', (err) => {
@@ -226,6 +266,7 @@ export function RealtimeProvider({ children }) {
                 ...prev.filter((n) => n.id !== notification.id),
             ].slice(0, 50));
             setUnreadNotifications((n) => n + 1);
+            setUnseenNotifications((n) => n + 1);
             // NOTE: we used to bump `unreadMessages` here too, but
             // `notification:new` of type MESSAGE_RECEIVED fires on
             // the same event as `message:new` below — counting both
@@ -249,7 +290,7 @@ export function RealtimeProvider({ children }) {
                 // refresh the sidebar dot when one arrives.
                 'TASK_DUE_SOON',
             ]);
-            if (TASK_TYPES.has(notification.type)) {
+            if (TASK_TYPES.has(notification.type) && !isRequester) {
                 api.get('/todos/summary')
                     .then((res) =>
                         setTodoAlertCount(res.data.counts?.alert || 0),
@@ -264,7 +305,7 @@ export function RealtimeProvider({ children }) {
                 'TASK_REASSIGN_APPROVED',
                 'TASK_REASSIGN_REJECTED',
             ]);
-            if (REASSIGN_TYPES.has(notification.type)) {
+            if (REASSIGN_TYPES.has(notification.type) && !isRequester) {
                 api.get('/reassignments/pending-count')
                     .then((res) =>
                         setPendingReassignmentCount(res.data.pending || 0),
@@ -296,14 +337,31 @@ export function RealtimeProvider({ children }) {
         // Server cleared a batch of notifications for me (e.g. I just
         // opened a chat). Drop them from the bell + recent list so the UI
         // catches up without waiting for a refetch.
-        sock.on('notifications:cleared', ({ ids = [], unread } = {}) => {
+        sock.on('notifications:cleared', ({ ids = [], unread, unseen } = {}) => {
             if (typeof unread === 'number') {
                 setUnreadNotifications(unread);
+            }
+            if (typeof unseen === 'number') {
+                setUnseenNotifications(unseen);
+            } else if (ids.length) {
+                // Cleared items are read → also seen. The event predates the
+                // `unseen` field, so re-read the authoritative badge count.
+                api.get('/notifications/unread-count')
+                    .then((r) =>
+                        setUnseenNotifications(
+                            r.data.unseen ?? r.data.unread ?? 0,
+                        ),
+                    )
+                    .catch(() => {});
             }
             if (ids.length) {
                 const idSet = new Set(ids);
                 setRecentNotifications((prev) =>
-                    prev.map((n) => (idSet.has(n.id) ? { ...n, read: true } : n)),
+                    prev.map((n) =>
+                        idSet.has(n.id)
+                            ? { ...n, read: true, seenAt: n.seenAt || new Date().toISOString() }
+                            : n,
+                    ),
                 );
             }
         });
@@ -414,13 +472,32 @@ export function RealtimeProvider({ children }) {
         try {
             const { data } = await api.post('/notifications/mark-read', { ids });
             setUnreadNotifications(data.unread || 0);
+            setUnseenNotifications(data.unseen ?? 0);
+            const stamp = new Date().toISOString();
             setRecentNotifications((prev) =>
                 prev.map((n) =>
-                    !ids || ids.includes(n.id) ? { ...n, read: true } : n,
+                    !ids || ids.includes(n.id)
+                        ? { ...n, read: true, seenAt: n.seenAt || stamp }
+                        : n,
                 ),
             );
         } catch {
             // ignore
+        }
+    }, []);
+
+    // Called when the bell dropdown opens: clears the badge (everything is
+    // now "seen") but leaves `read` alone so unopened items stay bold.
+    const markNotificationsSeen = useCallback(async () => {
+        setUnseenNotifications(0); // optimistic — the badge should vanish now
+        const stamp = new Date().toISOString();
+        setRecentNotifications((prev) =>
+            prev.map((n) => (n.seenAt ? n : { ...n, seenAt: stamp })),
+        );
+        try {
+            await api.post('/notifications/mark-seen');
+        } catch {
+            // ignore — will resync on the next refreshCounts
         }
     }, []);
 
@@ -442,6 +519,7 @@ export function RealtimeProvider({ children }) {
             presence,
             isOnline,
             unreadNotifications,
+            unseenNotifications,
             unreadMessages,
             recentNotifications,
             pendingUserCount,
@@ -460,6 +538,7 @@ export function RealtimeProvider({ children }) {
             leaveProject,
             sendTyping,
             markNotificationsRead,
+            markNotificationsSeen,
             refreshCounts,
             decrementUnreadMessages,
             setUnreadMessagesTotal,
@@ -470,6 +549,7 @@ export function RealtimeProvider({ children }) {
             presence,
             isOnline,
             unreadNotifications,
+            unseenNotifications,
             unreadMessages,
             recentNotifications,
             pendingUserCount,
@@ -486,6 +566,7 @@ export function RealtimeProvider({ children }) {
             leaveProject,
             sendTyping,
             markNotificationsRead,
+            markNotificationsSeen,
             refreshCounts,
             decrementUnreadMessages,
             setUnreadMessagesTotal,
@@ -510,6 +591,7 @@ export function useRealtime() {
             presence: new Set(),
             isOnline: () => false,
             unreadNotifications: 0,
+            unseenNotifications: 0,
             unreadMessages: 0,
             recentNotifications: [],
             pendingUserCount: 0,
@@ -528,6 +610,7 @@ export function useRealtime() {
             leaveProject: () => {},
             sendTyping: () => {},
             markNotificationsRead: () => {},
+            markNotificationsSeen: () => {},
             refreshCounts: () => {},
             decrementUnreadMessages: () => {},
             setUnreadMessagesTotal: () => {},

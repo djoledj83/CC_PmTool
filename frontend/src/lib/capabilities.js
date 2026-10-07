@@ -68,7 +68,16 @@ export const CAPABILITIES = {
     TICKET_CREATE: 'ticket:create',
     TICKET_MANAGE: 'ticket:manage',
     TICKET_VIEW_ALL: 'ticket:view:all',
+
+    // ---- Observability / audit --------------------------------------
+    // RESTRICTED: NOT part of the admin blanket — must be granted
+    // explicitly, even to an admin (see hasCapability + ADMIN defaults).
+    LOGS_VIEW: 'logs:view',
 };
+
+// Mirror of backend ADMIN_EXCLUDED_CAPABILITIES — capabilities an admin
+// does NOT get automatically.
+export const ADMIN_EXCLUDED_CAPABILITIES = [CAPABILITIES.LOGS_VIEW];
 
 // UI groupings shown as collapsible cards on the User edit dialog.
 // `risk` colours the row so admins can spot the dangerous toggles at a
@@ -409,6 +418,20 @@ export const CAPABILITY_GROUPS = [
             },
         ],
     },
+    {
+        id: 'observability',
+        label: 'Logs & audit (super admin)',
+        description:
+            'Restricted: even admins must be granted this. Holders get the admin Logs tab — the sign-in / auth audit trail and the server log files.',
+        items: [
+            {
+                key: CAPABILITIES.LOGS_VIEW,
+                label: 'View logs & sign-in audit',
+                hint: 'See the Logs admin page: who signed in (and failed), and the access / app / error server logs.',
+                risk: 'danger',
+            },
+        ],
+    },
 ];
 
 export const ROLE_LABELS = {
@@ -423,7 +446,12 @@ export const ROLE_LABELS = {
 // UI can render "comes from your role" hints next to checkboxes the
 // admin doesn't need to explicitly toggle.
 export const ROLE_DEFAULT_CAPABILITIES = {
-    ADMIN: Object.values(CAPABILITIES),
+    // Admins get everything EXCEPT the restricted set (logs:view), which
+    // must be granted per user — keeps the Users dialog showing it as a
+    // real, toggleable checkbox rather than a role-default.
+    ADMIN: Object.values(CAPABILITIES).filter(
+        (c) => !ADMIN_EXCLUDED_CAPABILITIES.includes(c),
+    ),
     MANAGER: [
         CAPABILITIES.TASK_CREATE_ANY,
         CAPABILITIES.TASK_EDIT_ANY,
@@ -473,7 +501,14 @@ export function roleDefaults(role) {
 // always have everything.
 export function hasCapability(user, capability) {
     if (!user) return false;
-    if (user.role === 'ADMIN') return true;
+    // Admins pass everything except the restricted (super-admin) set,
+    // which they must be granted explicitly like anyone else.
+    if (
+        user.role === 'ADMIN' &&
+        !ADMIN_EXCLUDED_CAPABILITIES.includes(capability)
+    ) {
+        return true;
+    }
     if (Array.isArray(user.effectiveCapabilities)) {
         return user.effectiveCapabilities.includes(capability);
     }

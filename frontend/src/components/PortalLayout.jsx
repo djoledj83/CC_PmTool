@@ -4,7 +4,7 @@
 // it too (e.g. to raise a request) but reach it explicitly.
 import { useState } from 'react';
 import { Outlet, Link, useNavigate } from 'react-router-dom';
-import { LifeBuoy, LogOut } from 'lucide-react';
+import { HelpCircle, LifeBuoy, LogOut } from 'lucide-react';
 
 import { useAuth } from '@/contexts/AuthContext';
 import { RealtimeProvider } from '@/contexts/RealtimeContext';
@@ -46,6 +46,14 @@ export function PortalLayout() {
                             >
                                 {user?.name || user?.email}
                             </button>
+                            <Link
+                                to="/portal/help"
+                                className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                                title="How the portal works"
+                            >
+                                <HelpCircle className="h-4 w-4" />
+                                <span className="hidden sm:inline">Help</span>
+                            </Link>
                             <NotificationBell ticketsOnly />
                             <Button
                                 variant="ghost"

@@ -1,12 +1,14 @@
 // Statistics view for the requester portal — mirrors the Insights ticket
 // dashboards (My tickets + workspace), but the three "My tickets" cards
 // are clickable to filter the Requests list. Uses /api/tickets/stats,
-// which now serves requesters (mine = reported by me; workspace = all).
+// which serves requesters too (mine = reported by me; "All tickets" =
+// every ticket they may see — counts only).
 import { useEffect, useState } from 'react';
 import { Inbox, CheckCircle2, Timer, Ticket } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/contexts/AuthContext';
 
 const STATUS_META = {
     NEW: { label: 'New', bar: 'bg-sky-500' },
@@ -107,6 +109,7 @@ function Bars({ obj, meta, total }) {
 }
 
 export function PortalStats({ onPick }) {
+    const { user } = useAuth();
     const [stats, setStats] = useState(null);
     const [loaded, setLoaded] = useState(false);
 
@@ -173,13 +176,18 @@ export function PortalStats({ onPick }) {
                 </div>
             </section>
 
-            {/* All tickets — workspace-wide, view only (no filtering). */}
+            {/* All tickets — every ticket this person may see (view only). */}
             {ws && (
                 <section>
-                    <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                    <h3 className="mb-0.5 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
                         <Ticket className="h-4 w-4" />
                         All tickets
                     </h3>
+                    <p className="mb-2 text-xs text-muted-foreground">
+                        {user?.external
+                            ? 'Every request you can see — yours, your organisation’s and the ones you were added to.'
+                            : 'Every request in the shared queue you can see.'}
+                    </p>
                     <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                         <StatCard label="Total" value={ws.total} sub="all time" icon={Ticket} tone="default" />
                         <StatCard label="Open" value={ws.open} sub="not yet resolved" icon={Inbox} tone={ws.open > 0 ? 'sky' : 'default'} />

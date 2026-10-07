@@ -12,8 +12,8 @@ const {
 
 /**
  * Narrow `where.projectId` to projects matching optional client /
- * application FK filters. Admin-only — non-admins get 403 if they
- * pass either param.
+ * application / product FK filters. Admin-only — non-admins get 403 if
+ * they pass any of these params.
  *
  * @param {object} where  Prisma TimeEntry where clause (mutated)
  * @param {object} query  req.query
@@ -24,17 +24,22 @@ async function applyClientApplicationProjectFilter(where, query, req) {
     const applicationId = query.applicationId
         ? String(query.applicationId)
         : null;
-    if (!clientId && !applicationId) return where;
+    // Product is the current project↔catalogue link (Application is the
+    // legacy one). The Charts tab filters by product; the All-users tab
+    // and CSV export don't send it, so they're unaffected.
+    const productId = query.productId ? String(query.productId) : null;
+    if (!clientId && !applicationId && !productId) return where;
     if (!isAdmin(req)) {
         throw httpError(
             403,
-            'Only admins can filter by client or application',
+            'Only admins can filter by client, application or product',
         );
     }
 
     const projectWhere = {};
     if (clientId) projectWhere.clientId = clientId;
     if (applicationId) projectWhere.applicationId = applicationId;
+    if (productId) projectWhere.productId = productId;
 
     const matchIds = (
         await prisma.project.findMany({

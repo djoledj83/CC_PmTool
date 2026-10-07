@@ -78,6 +78,21 @@ function projectRoom(projectId) {
     return `project:${projectId}`;
 }
 
+// Audience rooms. Staff (every non-REQUESTER role) share one room;
+// requesters join either the internal-requester room or their
+// organisation's room. Ticket pings and presence are sent only to the
+// rooms that may know about them — customers never hear about other
+// organisations' tickets or who in the team is online.
+const STAFF_ROOM = 'audience:staff';
+const INTERNAL_REQUESTERS_ROOM = 'audience:requesters';
+const orgRoom = (clientId) => `audience:org:${clientId}`;
+
+function audienceRoomsFor(user) {
+    if (!user || user.role !== 'REQUESTER') return [STAFF_ROOM];
+    if (user.external) return user.clientId ? [orgRoom(user.clientId)] : [];
+    return [INTERNAL_REQUESTERS_ROOM];
+}
+
 function isOnline(userId) {
     const set = userSockets.get(userId);
     return Boolean(set && set.size);
@@ -111,7 +126,35 @@ function emitToProject(projectId, event, payload) {
 
 function broadcastPresence(userId, online) {
     if (!io) return;
-    io.emit('presence:update', { userId, online });
+    io.to(STAFF_ROOM).emit('presence:update', { userId, online });
+}
+
+// A ticket event for everyone who may see the ticket: staff, the people
+// on it (`userIds`), and — unless it's internal — internal requesters and
+// the ticket's organisation.
+function emitToTicketAudience({ internal, clientId, userIds } = {}, event, payload) {
+    if (!io) return;
+    const rooms = [STAFF_ROOM];
+    if (!internal) {
+        rooms.push(INTERNAL_REQUESTERS_ROOM);
+        if (clientId) rooms.push(orgRoom(clientId));
+    }
+    for (const id of new Set((userIds || []).filter(Boolean))) {
+        rooms.push(userRoom(id));
+    }
+    io.to(rooms).emit(event, payload);
+}
+
+// Drop a user's live connections — after their role, organisation or
+// status changed. Clients reconnect on their own and join the rooms that
+// match the account as it is now (or are refused, if suspended).
+function disconnectUser(userId) {
+    if (!io || !userId) return;
+    try {
+        io.in(userRoom(userId)).disconnectSockets(true);
+    } catch {
+        /* best-effort */
+    }
 }
 
 // Broadcast to every connected client (used for shared-queue signals
@@ -129,7 +172,7 @@ function init(httpServer, { corsOrigin } = {}) {
         },
     });
 
-    io.use((socket, next) => {
+    io.use(async (socket, next) => {
         try {
             const token =
                 socket.handshake.auth?.token ||
@@ -139,10 +182,32 @@ function init(httpServer, { corsOrigin } = {}) {
                 );
             if (!token) return next(new Error('Missing token'));
             const payload = verifyAccessToken(token);
+            // Role / organisation come from the DB (like requireAuth), not
+            // the token, and revoked or suspended sessions are refused.
+            const row = await prisma.user.findUnique({
+                where: { id: payload.sub },
+                select: {
+                    id: true,
+                    email: true,
+                    role: true,
+                    status: true,
+                    external: true,
+                    clientId: true,
+                    tokenVersion: true,
+                },
+            });
+            if (!row || row.status !== 'ACTIVE') {
+                return next(new Error('Invalid token'));
+            }
+            const liveTv = typeof row.tokenVersion === 'number' ? row.tokenVersion : 0;
+            const tokenTv = typeof payload.tv === 'number' ? payload.tv : 0;
+            if (liveTv !== tokenTv) return next(new Error('Invalid token'));
             socket.data.user = {
-                id: payload.sub,
-                email: payload.email,
-                role: payload.role || 'USER',
+                id: row.id,
+                email: row.email,
+                role: row.role || 'USER',
+                external: Boolean(row.external),
+                clientId: row.clientId || null,
             };
             return next();
         } catch (err) {
@@ -152,8 +217,10 @@ function init(httpServer, { corsOrigin } = {}) {
 
     io.on('connection', (socket) => {
         const { id: userId } = socket.data.user;
+        const isStaff = socket.data.user.role !== 'REQUESTER';
 
         socket.join(userRoom(userId));
+        for (const room of audienceRoomsFor(socket.data.user)) socket.join(room);
 
         let bucket = userSockets.get(userId);
         const wasOnline = Boolean(bucket && bucket.size);
@@ -163,11 +230,23 @@ function init(httpServer, { corsOrigin } = {}) {
         }
         bucket.add(socket.id);
 
-        // Initial state for the just-connected client.
-        socket.emit('presence:state', { online: getOnlineUserIds() });
+        // Initial state for the just-connected client (staff only — who
+        // is online is internal information).
+        socket.emit('presence:state', { online: isStaff ? getOnlineUserIds() : [] });
 
-        // Tell everyone else this user just came online (only on first socket).
-        if (!wasOnline) broadcastPresence(userId, true);
+        // Tell the team this user just came online (only on first socket).
+        if (!wasOnline && isStaff) broadcastPresence(userId, true);
+
+        // Requesters have no chat or projects — nothing below is theirs.
+        if (!isStaff) {
+            socket.on('disconnect', () => {
+                const set = userSockets.get(userId);
+                if (!set) return;
+                set.delete(socket.id);
+                if (set.size === 0) userSockets.delete(userId);
+            });
+            return;
+        }
 
         // Conversation-room subscriptions: a client tells us which DM /
         // project rooms it cares about (so message:new events get there).
@@ -232,7 +311,7 @@ function init(httpServer, { corsOrigin } = {}) {
             set.delete(socket.id);
             if (set.size === 0) {
                 userSockets.delete(userId);
-                broadcastPresence(userId, false);
+                if (isStaff) broadcastPresence(userId, false);
             }
         });
     });
@@ -249,6 +328,9 @@ module.exports = {
     emitToConversation,
     emitToProject,
     emitToAll,
+    emitToTicketAudience,
+    audienceRoomsFor,
+    disconnectUser,
     userRoom,
     conversationRoom,
     projectRoom,

@@ -94,6 +94,78 @@ export function flashDeepLinkTarget(
     };
 }
 
+// Copy text to the clipboard; resolves true on success.
+//
+// `navigator.clipboard` only exists in a SECURE context (https:// or
+// localhost) — on our plain-http deployments it's undefined, so we fall
+// back to execCommand('copy'): first via a `copy` event listener that
+// injects the text (needs no selection, so it also works inside modal
+// focus traps), then via a hidden textarea placed next to the focused
+// element (so a dialog / menu focus trap doesn't steal its focus).
+export async function copyText(text) {
+    const value = String(text ?? '');
+    if (
+        typeof navigator !== 'undefined' &&
+        navigator.clipboard?.writeText &&
+        typeof window !== 'undefined' &&
+        window.isSecureContext
+    ) {
+        try {
+            await navigator.clipboard.writeText(value);
+            return true;
+        } catch {
+            /* permission denied etc. — try the fallbacks */
+        }
+    }
+    if (typeof document === 'undefined') return false;
+    let handled = false;
+    const onCopy = (e) => {
+        if (!e.clipboardData) return;
+        e.clipboardData.setData('text/plain', value);
+        e.preventDefault();
+        handled = true;
+    };
+    document.addEventListener('copy', onCopy, true);
+    try {
+        document.execCommand('copy');
+    } catch {
+        /* unsupported */
+    } finally {
+        document.removeEventListener('copy', onCopy, true);
+    }
+    if (handled) return true;
+    try {
+        const prev = document.activeElement;
+        const anchor =
+            prev && prev !== document.body
+                ? prev.parentElement || document.body
+                : document.body;
+        const ta = document.createElement('textarea');
+        ta.value = value;
+        ta.setAttribute('readonly', '');
+        ta.setAttribute('aria-hidden', 'true');
+        Object.assign(ta.style, {
+            position: 'fixed',
+            top: '0',
+            left: '0',
+            width: '1px',
+            height: '1px',
+            opacity: '0',
+            pointerEvents: 'none',
+        });
+        anchor.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, value.length);
+        const ok = document.execCommand('copy');
+        anchor.removeChild(ta);
+        prev?.focus?.();
+        return Boolean(ok);
+    } catch {
+        return false;
+    }
+}
+
 export function initials(name) {
     if (!name) return '?';
     return name

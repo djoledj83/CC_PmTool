@@ -4,7 +4,7 @@
 // { userIds, groupIds } when they hit Add. Used on the raise-request
 // dialog (collect for create) and the request detail (add immediately).
 import { useEffect, useRef, useState } from 'react';
-import { UserPlus, Users, Check, Search } from 'lucide-react';
+import { UserPlus, Users, Check, Search, ChevronDown } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -19,6 +19,13 @@ export function RequesterPicker({
     label = 'Add people',
     excludeUserIds = [],
     onConfirm,
+    // Optional: extra trigger classes (e.g. a larger button in a card
+    // header) and popover alignment.
+    triggerClassName,
+    align = 'start',
+    // 'button' (default) or 'field' — a full-width, select-like trigger
+    // for forms ("Add people / group ▾").
+    triggerVariant = 'button',
 }) {
     const [open, setOpen] = useState(false);
     const [users, setUsers] = useState([]);
@@ -60,6 +67,9 @@ export function RequesterPicker({
         onConfirm?.({
             userIds: Array.from(selUsers),
             groupIds: Array.from(selGroups),
+            // The picked records too, so a form can show names as chips.
+            users: users.filter((u) => selUsers.has(u.id)),
+            groups: groups.filter((g) => selGroups.has(g.id)),
         });
         setSelUsers(new Set());
         setSelGroups(new Set());
@@ -70,17 +80,33 @@ export function RequesterPicker({
     return (
         <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>
-                <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-7 gap-1.5 px-2 text-xs"
-                >
-                    <UserPlus className="h-3.5 w-3.5" />
-                    {label}
-                </Button>
+                {triggerVariant === 'field' ? (
+                    <button
+                        type="button"
+                        className={cn(
+                            'flex h-10 w-full items-center justify-between gap-2 rounded-md border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-accent/40',
+                            triggerClassName,
+                        )}
+                    >
+                        <span className="flex min-w-0 items-center gap-2">
+                            <UserPlus className="h-4 w-4 shrink-0" />
+                            <span className="truncate">{label}</span>
+                        </span>
+                        <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+                    </button>
+                ) : (
+                    <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className={cn('h-7 gap-1.5 px-2 text-xs', triggerClassName)}
+                    >
+                        <UserPlus className="h-3.5 w-3.5" />
+                        {label}
+                    </Button>
+                )}
             </PopoverTrigger>
-            <PopoverContent align="start" className="w-72 p-2">
+            <PopoverContent align={align} className="w-72 p-2">
                 <div className="relative mb-2">
                     <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
                     <input

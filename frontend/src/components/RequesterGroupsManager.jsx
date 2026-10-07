@@ -74,13 +74,15 @@ export function RequesterGroupsManager() {
                     No groups yet. Create one to bundle requesters together.
                 </p>
             ) : (
-                <div className="space-y-2">
+                /* Bordered, divided list rows — same row treatment as the
+                   inline-edit sections on the Templates page. */
+                <div className="divide-y rounded-lg border">
                     {groups.map((g) => (
                         <div
                             key={g.id}
-                            className="flex items-start gap-3 rounded-lg border bg-background p-3"
+                            className="flex items-center gap-3 px-3 py-2"
                         >
-                            <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                                 <Users className="h-4 w-4" />
                             </span>
                             <div className="min-w-0 flex-1">

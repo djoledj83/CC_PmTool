@@ -5,7 +5,7 @@
 > `MANIFEST.md`. Sections are ordered oldest-first; the in-app "What's new"
 > popover shows them newest-last and only recognises `## N. Title` headings.
 
-Version: **v1.0.0** (semantic versioning) · Last updated: **2026-09-07**
+Version: **v1.1.0** (semantic versioning) · Last updated: **2026-10-07**
 
 ---
 
@@ -69,3 +69,21 @@ Modules added later (sprints & planning boards, ticketing / help-desk, products,
   configuration — see `TEMPLATE_SETUP.md`.
 - Database schema delivered as the `prisma/migrations` chain; apply with
   `prisma migrate deploy`.
+
+---
+
+## 4. v1.1.0 — help desk upgrades, auth audit & admin logs
+
+- Tickets: per-type help texts and tips shown to requesters (portal Help
+  page, editors under Templates), automatic closing of resolved tickets
+  after a configurable period, status-change notifications to requesters,
+  richer ticket detail / raise-ticket screens.
+- Users: approval dialog for pending accounts, country codes on profiles.
+- Auth audit trail (`AuthEvent`) and an admin Logs page with CSV export.
+- Notifications remember when they were seen; multi-project selector,
+  structured backend logger, time-tracking CSV export presets.
+- Requires migrations `20260827000000_notification_seen_at` …
+  `20261002050000_ticket_status_notification` (applied automatically on boot).
+- Files: `backend/src/routes/ticketHelp.js`, `adminLogs.js`,
+  `backend/src/lib/{authAudit,logger,ticketAutoClose,ticketHelp,ticketStatusNotify,countryCodes}.js`,
+  `frontend/src/pages/{AdminLogs,PortalHelp}.jsx`, `frontend/src/components/Ticket*.jsx`.

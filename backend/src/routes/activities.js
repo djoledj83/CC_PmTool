@@ -2051,13 +2051,22 @@ router.get('/', async (req, res, next) => {
                         break;
                     case 'TICKET_STATUS_CHANGED':
                         typeKey = 'ticket_status_changed';
-                        summary = `moved ticket ${code}"${subject}" from ${
-                            TICKET_STATUS_LABELS[e.fromValue] ||
-                            e.fromValue ||
-                            '—'
-                        } to ${
-                            TICKET_STATUS_LABELS[e.toValue] || e.toValue || '—'
-                        }`;
+                        // Closed by the auto-close sweep (no actor).
+                        summary = meta.autoClosed
+                            ? `closed ticket ${code}"${subject}" automatically${
+                                  meta.autoCloseDays
+                                      ? ` (${meta.autoCloseDays} ${
+                                            meta.autoCloseDays === 1 ? 'day' : 'days'
+                                        } after it was resolved)`
+                                      : ''
+                              }`
+                            : `moved ticket ${code}"${subject}" from ${
+                                  TICKET_STATUS_LABELS[e.fromValue] ||
+                                  e.fromValue ||
+                                  '—'
+                              } to ${
+                                  TICKET_STATUS_LABELS[e.toValue] || e.toValue || '—'
+                              }`;
                         break;
                     case 'TICKET_ASSIGNED':
                         typeKey = 'ticket_assigned';
@@ -2077,7 +2086,18 @@ router.get('/', async (req, res, next) => {
                         typeKey = 'ticket_event';
                         summary = `acted on ticket ${code}"${subject}"`;
                 }
-                items.push({ ...base, type: typeKey, target, summary });
+                items.push({
+                    ...base,
+                    // The auto-close sweep has no user — name it.
+                    actor:
+                        base.actor ||
+                        (meta.autoClosed
+                            ? { id: null, name: 'Auto-close', avatarUrl: null }
+                            : null),
+                    type: typeKey,
+                    target,
+                    summary,
+                });
             } else if (e.type?.startsWith('ANNOUNCEMENT_')) {
                 // Broadcast announcement audit events (admin, no project).
                 const meta = e.meta || {};

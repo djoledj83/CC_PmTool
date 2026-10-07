@@ -5,6 +5,7 @@ const prisma = require('../lib/prisma');
 const { requireAuth } = require('../middleware/auth');
 const { httpError } = require('../middleware/error');
 const { accessibleProjectIds, isAdmin } = require('../lib/permissions');
+const { ticketScopeWhere } = require('../lib/ticketAccess');
 
 const router = express.Router();
 
@@ -18,6 +19,11 @@ const KINDS = ['PROJECT', 'TASK_FOCUS', 'SPRINT_GOAL', 'RELEASE_PROD', 'ACTIVITY
 // user can't see (or that have been deleted). Throws httpError on
 // any check that fails; resolves to void on success.
 async function ensureRefVisible(req, kind, refId) {
+    // Requesters only ever pin tickets.
+    if (req.user.role === 'REQUESTER' && kind !== 'TICKET') {
+        throw httpError(403, 'Not available for requester accounts.');
+    }
+    if (kind === 'TICKET') return ensureTicketVisible(req, refId);
     const scope = await accessibleProjectIds(req);
     if (kind === 'PROJECT') {
         const row = await prisma.project.findFirst({
@@ -57,16 +63,6 @@ async function ensureRefVisible(req, kind, refId) {
         if (!row) throw httpError(404, 'Release not found');
         return;
     }
-    if (kind === 'TICKET') {
-        // Tickets are a shared portal queue — any signed-in user can pin
-        // any ticket. We just verify the row exists.
-        const row = await prisma.ticket.findUnique({
-            where: { id: refId },
-            select: { id: true },
-        });
-        if (!row) throw httpError(404, 'Ticket not found');
-        return;
-    }
     if (kind === 'ACTIVITY') {
         // Activity rows come from many tables (events + projects +
         // tasks + …). The composite ID format used by the activity
@@ -77,6 +73,15 @@ async function ensureRefVisible(req, kind, refId) {
         return;
     }
     throw httpError(400, `Unknown pin kind: ${kind}`);
+}
+
+// Tickets: only ones the caller may see (same rules as the ticket list).
+async function ensureTicketVisible(req, refId) {
+    const row = await prisma.ticket.findFirst({
+        where: { AND: [{ id: refId }, ticketScopeWhere(req)] },
+        select: { id: true },
+    });
+    if (!row) throw httpError(404, 'Ticket not found');
 }
 
 // GET /api/pins

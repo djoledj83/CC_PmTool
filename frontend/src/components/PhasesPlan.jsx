@@ -22,6 +22,7 @@ import {
     MessageSquare,
     MessageSquareOff,
     MessageSquarePlus,
+    MoreHorizontal,
     Paperclip,
     Pencil,
     Plus,
@@ -78,6 +79,13 @@ import {
     PopoverContent,
     PopoverTrigger,
 } from '@/components/ui/popover';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
     Dialog,
     DialogContent,
@@ -258,14 +266,19 @@ function formatDate(d) {
 // Assignee left relative to the header. A fixed width keeps the 1fr
 // column identical across the header and every data row, so the columns
 // line up perfectly.
+//
+// Redesign (2026-09): priority left the table and became a colored
+// "spine" on the row's left edge (col 1), the chevron + done-checkbox
+// share one cell (col 2), and the actions column shrank to two quick
+// buttons + an overflow menu. Net effect: ~230px narrower than the old
+// 8-column layout, so the plan fits a laptop without sideways scroll.
 const TASK_GRID_COLS =
-    'grid-cols-[40px_40px_minmax(0,1fr)_140px_130px_110px_180px_184px]';
+    'grid-cols-[26px_52px_minmax(0,1fr)_96px_128px_150px_96px]';
 
-// Shared cell wrapper class. Rendering each cell as a stretched flex
-// container means the column dividers (`border-r`) span the full row
-// height instead of just the inline content, which is what gives the
-// task list a real "table" look. `align` chooses the horizontal text
-// alignment per column.
+// Shared cell wrapper class. Each cell is a stretched flex container so
+// vertical alignment is consistent across the row. `align` chooses the
+// horizontal alignment per column. (The old per-column dividers were
+// dropped for a calmer, less spreadsheet-like look.)
 function cellCls(align = 'center') {
     const justify =
         align === 'left'
@@ -273,23 +286,66 @@ function cellCls(align = 'center') {
             : align === 'right'
                 ? 'justify-end'
                 : 'justify-center';
-    return cn(
-        'flex items-center border-r border-border/40 px-2 py-1 last:border-r-0',
-        justify,
+    return cn('flex items-center px-2 py-2', justify);
+}
+
+// Solid fill for the priority spine, keyed by the PriorityOption colour
+// token (admin-managed). Falls back to a sensible tone per built-in value.
+const SPINE_BG = {
+    slate: 'bg-slate-400 dark:bg-slate-500',
+    sky: 'bg-sky-500',
+    emerald: 'bg-emerald-500',
+    amber: 'bg-amber-500',
+    rose: 'bg-rose-500',
+    violet: 'bg-violet-500',
+};
+const SPINE_FALLBACK = { HIGH: 'bg-rose-500', MEDIUM: 'bg-sky-500', LOW: 'bg-slate-400' };
+
+function spineBg(priority) {
+    return (
+        SPINE_BG[priority?.color] ||
+        SPINE_FALLBACK[priority?.value] ||
+        'bg-muted-foreground/30'
     );
 }
 
-// Compact priority dropdown shown inline on a task row. Reads from the
-// admin-managed PriorityOption table so labels/colors stay in sync.
-function PriorityRowSelect({ value, onChange, fallbackPriority }) {
+// The priority "spine": a full-height colour band at the row's left
+// edge with the priority label set vertically — the same device the
+// project cards and My to-do use. When the row is editable the whole
+// spine is a Select trigger, so priority is still changed inline with
+// one click; otherwise it's a plain band.
+function PrioritySpine({ value, onChange, fallbackPriority, editable, done }) {
     const { list, find } = useTaskPriorities();
     const current = find(value) || fallbackPriority;
+    const bandCls = cn(
+        'flex h-full w-full flex-col items-center justify-center gap-1',
+        spineBg(current),
+        done && 'opacity-50',
+    );
+    const label = (
+        <span className="rotate-180 whitespace-nowrap text-[9px] font-semibold uppercase tracking-wider text-white [writing-mode:vertical-rl]">
+            {current.label}
+        </span>
+    );
+    if (!editable) {
+        return (
+            <div className={bandCls} title={`Priority: ${current.label}`}>
+                {label}
+            </div>
+        );
+    }
     return (
         <Select value={value} onValueChange={onChange}>
-            <SelectTrigger className="h-7 w-auto gap-1 border-none bg-transparent px-1 text-xs">
-                <Badge variant={current.badge} className="text-[10px]">
-                    {current.label}
-                </Badge>
+            <SelectTrigger
+                className={cn(
+                    bandCls,
+                    // Strip the default trigger chrome so it IS the band.
+                    'rounded-none border-0 p-0 shadow-none ring-offset-0 hover:brightness-110 focus:ring-0 [&>svg]:hidden',
+                )}
+                title={`Priority: ${current.label} — click to change`}
+                aria-label={`Priority: ${current.label}`}
+            >
+                {label}
             </SelectTrigger>
             <SelectContent>
                 {list.map((p) => (
@@ -330,9 +386,16 @@ function StatusRowSelect({ value, onChange, fallbackStatus }) {
     const current = find(value) || fallbackStatus;
     return (
         <Select value={value} onValueChange={onChange}>
-            <SelectTrigger className="h-7 w-auto gap-1 border-none bg-transparent px-1 text-xs">
-                <Badge variant={current.badge} className="text-[10px]">
+            {/* The trigger reads as an editable pill: coloured badge plus
+                a small chevron, and a hover tint — so users can tell it's
+                a control, not just a label. */}
+            <SelectTrigger
+                className="h-7 w-auto gap-0.5 rounded-full border-none bg-transparent px-0.5 text-xs hover:bg-accent/60 [&>svg]:hidden"
+                title="Change status"
+            >
+                <Badge variant={current.badge} className="gap-1 text-[10px]">
                     {current.label}
+                    <ChevronDown className="h-3 w-3 opacity-70" />
                 </Badge>
             </SelectTrigger>
             <SelectContent>
@@ -1499,8 +1562,14 @@ export function PhasesPlan({
         return -1;
     }, [phaseSections]);
 
+    // Progress counts the FULL phase (all top-level tasks + subtasks),
+    // NOT the currently-visible rows. Otherwise turning on "Hide
+    // completed" would strip the done tasks out of the count and the bar
+    // would read 0/N. We read the unfiltered `topTasksByPhase` /
+    // `subtasksByParent` here on purpose; `phase.tasks` is the filtered
+    // view used only for rendering rows.
     const totalsForPhase = (phase) =>
-        phase.tasks.reduce(
+        (topTasksByPhase.get(phase.id) || []).reduce(
             (acc, t) => {
                 acc.total += 1;
                 if (t.status === 'DONE') acc.done += 1;
@@ -1760,6 +1829,26 @@ export function PhasesPlan({
                                                 title="All tasks complete"
                                             />
                                         ) : null}
+                                        {/* Progress bar: tasks done / total,
+                                            so phase completion reads at a
+                                            glance instead of only as text. */}
+                                        {totals.total > 0 && (
+                                            <span
+                                                className="hidden h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-muted sm:inline-block"
+                                                role="progressbar"
+                                                aria-valuenow={totals.done}
+                                                aria-valuemin={0}
+                                                aria-valuemax={totals.total}
+                                                aria-label={`${totals.done} of ${totals.total} tasks done`}
+                                            >
+                                                <span
+                                                    className="block h-full rounded-full bg-emerald-500 transition-[width] duration-300"
+                                                    style={{
+                                                        width: `${Math.round((totals.done / totals.total) * 100)}%`,
+                                                    }}
+                                                />
+                                            </span>
+                                        )}
                                         <Badge
                                             variant="secondary"
                                             className="h-5 px-1.5 text-[10px]"
@@ -2169,9 +2258,15 @@ export function PhasesPlan({
                                                     the rows perfectly aligned
                                                     even when the viewport
                                                     is narrow. */}
-                                                <div className="min-w-[900px]">
+                                                <div className="min-w-[680px] p-2">
                                                     <TaskColumnHeader theme={theme} />
-                                                    <ul className="divide-y">
+                                                    {/* Small gap between task
+                                                        rows so each priority
+                                                        spine reads as its own
+                                                        band (space-y, not the
+                                                        old continuous divider
+                                                        list). */}
+                                                    <ul className="space-y-1.5 pt-1.5">
                                                         {phase.tasks.map((task) => (
                                                             <TaskTree
                                                                 key={task.id}
@@ -2762,20 +2857,20 @@ function TaskColumnHeader({ theme }) {
     return (
         <div
             className={cn(
-                'grid items-stretch border-b border-border/60 text-[10px] font-semibold uppercase tracking-wide',
+                'grid items-stretch border-b border-border/60 text-[10px] font-semibold uppercase tracking-wide [&>div]:py-1.5',
                 TASK_GRID_COLS,
                 theme?.column ||
                     'bg-slate-100/80 text-muted-foreground dark:bg-slate-800/60',
             )}
             role="row"
         >
+            {/* col 1 = priority spine, col 2 = expand + done — unlabeled. */}
             <div className={cellCls('center')} aria-hidden />
             <div className={cellCls('center')} aria-hidden />
             <div className={cellCls('left')}>Task</div>
             <div className={cellCls('left')}>Due</div>
             <div className={cellCls('left')}>Status</div>
-            <div className={cellCls('left')}>Priority</div>
-            <div className={cellCls('left')}>Assignee</div>
+            <div className={cellCls('left')}>Owner</div>
             <div className={cellCls('right')}>Actions</div>
         </div>
     );
@@ -2900,26 +2995,21 @@ function TaskTree({
             )}
 
             {expanded && (
-                /* Visually nest the subtask block so collapsed
-                   rows still read as CHILDREN of the parent task,
-                   not as siblings. The wrapper is shifted right
-                   with `ml-6` and carries a tinted left-tree-line
-                   (`border-l-4 border-l-indigo-300`) plus a
-                   soft tinted background that matches the
-                   subtask zebra tones. Combined with the
-                   per-row indigo tints inside SubtaskColumnHeader
-                   / TaskRow, the indent communicates hierarchy
-                   without needing a separate column-shifted
-                   grid (the grid stays aligned with itself —
-                   it's the entire group that moves inward). */
-                <div className="ml-6 mt-1 mb-2 overflow-hidden rounded-md border-l-4 border-l-indigo-400 bg-indigo-50/40 ring-1 ring-indigo-200/60 dark:border-l-indigo-500 dark:bg-indigo-500/[0.05] dark:ring-indigo-500/30">
-                    {subCount > 0 && <SubtaskColumnHeader />}
+                /* Visually nest the subtask block so rows read as
+                   CHILDREN of the parent task, not as siblings: the
+                   whole group shifts right (`ml-8`) under the parent's
+                   title and hangs off a thin accent tree-line on a
+                   slightly recessed background. The column header is
+                   deliberately NOT repeated here — the single header
+                   at the top of the phase labels every row, parent or
+                   child, since they share the same grid. */
+                <div className="ml-8 mt-1 mb-2 overflow-hidden rounded-r-md border-l-2 border-l-primary/40 bg-muted/30 dark:bg-muted/20">
                     {subCount === 0 ? (
                         <div className="px-3 py-3 pl-12 text-xs text-muted-foreground">
                             No subtasks yet.
                         </div>
                     ) : (
-                        <ul className="divide-y divide-indigo-200/60 dark:divide-indigo-500/20">
+                        <ul className="divide-y divide-border/60">
                             {subtasks.map((sub, i) => (
                                 <li key={sub.id}>
                                     <TaskRow
@@ -3313,29 +3403,6 @@ function InlineTaskNoteCard({ note, projectId }) {
     );
 }
 
-// Same labels as TaskColumnHeader but rendered with the subtask palette
-// so it visually flags the expanded sub-list.
-function SubtaskColumnHeader() {
-    return (
-        <div
-            className={cn(
-                'grid items-stretch border-b border-indigo-300/60 bg-indigo-100 text-[10px] font-semibold uppercase tracking-wide text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-200',
-                TASK_GRID_COLS,
-            )}
-            role="row"
-        >
-            <div className={cellCls('center')} aria-hidden />
-            <div className={cellCls('center')} aria-hidden />
-            <div className={cellCls('left')}>Subtask</div>
-            <div className={cellCls('left')}>Due</div>
-            <div className={cellCls('left')}>Status</div>
-            <div className={cellCls('left')}>Priority</div>
-            <div className={cellCls('left')}>Assignee</div>
-            <div className={cellCls('right')}>Actions</div>
-        </div>
-    );
-}
-
 function TaskRow({
     task,
     users,
@@ -3505,15 +3572,14 @@ function TaskRow({
     const canChangeStatus =
         !isApprovalLocked && (canManage || isOwnCreation || isAssignee);
 
-    // Distinct row tones so the user can pick out tasks vs subtasks at a
-    // glance. Tasks get a clearly-tinted amber stripe; subtasks
-    // alternate between two indigo tints with much stronger contrast
-    // so the zebra effect is impossible to miss.
+    // Calm row tones: tasks sit on the card surface; subtasks (already
+    // indented under an accent tree-line) get a faint zebra so long
+    // sub-lists stay scannable without shouting.
     const rowTone = isSubtask
         ? zebraIndex % 2 === 0
-            ? 'bg-indigo-50 dark:bg-indigo-500/[0.12]'
-            : 'bg-indigo-100 dark:bg-indigo-500/[0.22]'
-        : 'bg-amber-100/70 dark:bg-amber-500/[0.14]';
+            ? 'bg-transparent'
+            : 'bg-muted/40'
+        : 'bg-card';
 
     const isDone = task.status === 'DONE';
 
@@ -3571,16 +3637,16 @@ function TaskRow({
         <div
             id={`task-${task.id}`}
             className={cn(
-                'scroll-mt-24 rounded-md',
+                // overflow-hidden clips the priority spine to the rounded
+                // corners so the colour band follows the row's shape. A
+                // hairline border + the list's `space-y` gap make each row
+                // read as its own separated band.
+                'scroll-mt-24 overflow-hidden rounded-lg border border-border/60 shadow-sm',
                 rowTone,
-                // "Specific" (approval-required) tasks get a subtle
-                // violet left-accent stripe plus a very faint tint so
-                // they read as distinct from normal tasks at a glance.
-                // Subtasks are never specific, so this only ever hits
-                // top-level task rows. Kept deliberately understated so
-                // it doesn't fight the status chip or selected/hover.
-                task.specific &&
-                    'border-l-2 border-l-violet-400 dark:border-l-violet-500/70',
+                // "Specific" (approval-required) tasks get a very faint
+                // violet tint so they read as distinct at a glance (the
+                // approval chip on line 1 carries the explicit state; the
+                // left edge now belongs to the priority spine).
                 task.specific &&
                     'bg-violet-500/[0.04] dark:bg-violet-500/[0.07]',
                 // The `task-pulse` animation is defined in
@@ -3595,16 +3661,32 @@ function TaskRow({
         >
         <div
             className={cn(
-                'grid items-stretch transition-colors hover:bg-muted/40',
+                'grid min-h-[3.25rem] items-stretch transition-colors hover:bg-muted/40',
                 TASK_GRID_COLS,
             )}
         >
-            <div className={cellCls('center')}>
+            {/* col 1 — priority spine. Full-height colour band with the
+                priority label set vertically (same device as the project
+                cards / My to-do). Editable rows can click it to change
+                priority inline. */}
+            <div className="flex items-stretch">
+                <PrioritySpine
+                    value={task.priority}
+                    onChange={onPriority}
+                    fallbackPriority={priority}
+                    editable={rowCanEdit}
+                    done={isDone}
+                />
+            </div>
+
+            {/* col 2 — expand chevron (when the task has / can have
+                subtasks) + the done checkbox, sharing one narrow cell. */}
+            <div className={cn(cellCls('center'), 'gap-1 px-1')}>
                 {expandable ? (
                     <button
                         type="button"
                         onClick={onToggleExpand}
-                        className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent"
+                        className="flex h-6 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent"
                         title={
                             expanded ? 'Collapse subtasks' : 'Expand subtasks'
                         }
@@ -3619,19 +3701,14 @@ function TaskRow({
                         )}
                     </button>
                 ) : (
-                    <span className="flex h-6 w-6 items-center justify-center text-muted-foreground/50">
-                        <GitBranch className="h-3 w-3" />
-                    </span>
+                    <span className="h-6 w-5 shrink-0" aria-hidden />
                 )}
-            </div>
-
-            {/*
-              Checkbox affordance for "done". Reuses the existing
-              status-change permission so admins (and a task's own
-              assignee) can flip it; everyone else sees a read-only
-              checkbox. Clicking toggles DONE <-> TODO.
-            */}
-            <div className={cellCls('center')}>
+                {/*
+                  Checkbox affordance for "done". Reuses the existing
+                  status-change permission so admins (and a task's own
+                  assignee) can flip it; everyone else sees a read-only
+                  checkbox. Clicking toggles DONE <-> TODO.
+                */}
                 <button
                     type="button"
                     onClick={() =>
@@ -3666,17 +3743,6 @@ function TaskRow({
                                 }
                             >
                                 {task.code}
-                            </span>
-                        )}
-                        {task.sprintId && task.sprint && (
-                            <span
-                                className="inline-flex shrink-0 items-center gap-0.5 rounded border border-violet-500/30 bg-violet-500/10 px-1 py-px text-[10px] font-medium uppercase tracking-wide text-violet-700 dark:text-violet-300"
-                                title={`In sprint: ${task.sprint.name}`}
-                            >
-                                <span className="font-mono">↯</span>
-                                <span className="max-w-[110px] truncate">
-                                    {task.sprint.name}
-                                </span>
                             </span>
                         )}
                         {/* "Specific" chip: emerald once approved,
@@ -3716,31 +3782,6 @@ function TaskRow({
                                     Pending approval
                                 </span>
                             ))}
-                        {/* CR chip: only shown when this task belongs
-                            to a CR AND we're not already viewing that
-                            CR (would be redundant). Clickable — jumps
-                            to the CR detail page. Uses task.projectId
-                            for the URL since the parent project id is
-                            always present on a task row. */}
-                        {task.changeRequestId &&
-                        task.changeRequest &&
-                        task.changeRequestId !== viewerChangeRequestId ? (
-                            <Link
-                                to={`/projects/${task.projectId}/cr/${task.changeRequestId}`}
-                                onClick={(e) => e.stopPropagation()}
-                                className="inline-flex shrink-0 items-center gap-0.5 rounded border border-amber-500/30 bg-amber-500/10 px-1 py-px text-[10px] font-medium uppercase tracking-wide text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
-                                title={`In change request: ${task.changeRequest.title}`}
-                            >
-                                <span className="font-mono">CR</span>
-                                <span className="max-w-[110px] truncate">
-                                    {task.changeRequest.code
-                                        ? task.changeRequest.code
-                                              .split('-CR-')
-                                              .slice(-1)[0]
-                                        : task.changeRequest.title}
-                                </span>
-                            </Link>
-                        ) : null}
                         {rowCanEdit ? (
                             <button
                                 type="button"
@@ -3778,7 +3819,11 @@ function TaskRow({
                             </span>
                         )}
                     </div>
-                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    {/* Line 2 — quiet details: description, subtask count,
+                        estimate, sprint / CR chips, creator. Everything
+                        that isn't the task's name lives here so line 1
+                        stays clean. */}
+                    <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
                         {task.description && (
                             <div className="flex min-w-0 max-w-full items-center gap-1">
                                 {/* The <p> is always rendered (with the
@@ -3839,10 +3884,57 @@ function TaskRow({
                             </div>
                         )}
                         {expandable && subCount > 0 && (
-                            <span className="text-[10px] text-muted-foreground">
+                            <span className="inline-flex shrink-0 items-center gap-1">
+                                <GitBranch className="h-3 w-3" />
                                 {subCount} subtask{subCount === 1 ? '' : 's'}
                             </span>
                         )}
+                        {/* Estimate (hours) — the plan's time budget for
+                            this task; logged-vs-estimate needs a BE
+                            aggregate and is a follow-up. */}
+                        {task.estimateHours != null && task.estimateHours !== '' && (
+                            <span
+                                className="inline-flex shrink-0 items-center gap-1"
+                                title="Estimated hours"
+                            >
+                                <Clock className="h-3 w-3" />
+                                Est. {task.estimateHours}h
+                            </span>
+                        )}
+                        {task.sprintId && task.sprint && (
+                            <span
+                                className="inline-flex shrink-0 items-center gap-0.5 rounded border border-violet-500/30 bg-violet-500/10 px-1 py-px text-[10px] font-medium uppercase tracking-wide text-violet-700 dark:text-violet-300"
+                                title={`In sprint: ${task.sprint.name}`}
+                            >
+                                <span className="font-mono">↯</span>
+                                <span className="max-w-[110px] truncate">
+                                    {task.sprint.name}
+                                </span>
+                            </span>
+                        )}
+                        {/* CR chip: only shown when this task belongs
+                            to a CR AND we're not already viewing that
+                            CR (would be redundant). Clickable — jumps
+                            to the CR detail page. */}
+                        {task.changeRequestId &&
+                        task.changeRequest &&
+                        task.changeRequestId !== viewerChangeRequestId ? (
+                            <Link
+                                to={`/projects/${task.projectId}/cr/${task.changeRequestId}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex shrink-0 items-center gap-0.5 rounded border border-amber-500/30 bg-amber-500/10 px-1 py-px text-[10px] font-medium uppercase tracking-wide text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+                                title={`In change request: ${task.changeRequest.title}`}
+                            >
+                                <span className="font-mono">CR</span>
+                                <span className="max-w-[110px] truncate">
+                                    {task.changeRequest.code
+                                        ? task.changeRequest.code
+                                              .split('-CR-')
+                                              .slice(-1)[0]
+                                        : task.changeRequest.title}
+                                </span>
+                            </Link>
+                        ) : null}
                         {/* Creator chip — ALWAYS surfaces the user
                             who created this task / subtask. The
                             user explicitly asked for this pill to be
@@ -3975,24 +4067,10 @@ function TaskRow({
                 )}
             </div>
 
-            <div className={cellCls('left')}>
-                {rowCanEdit ? (
-                    <PriorityRowSelect
-                        value={task.priority}
-                        onChange={onPriority}
-                        fallbackPriority={priority}
-                    />
-                ) : (
-                    <Badge variant={priority.badge} className="text-[10px]">
-                        {priority.label}
-                    </Badge>
-                )}
-            </div>
-
             <div
                 className={cn(
                     cellCls('left'),
-                    'flex-col items-start justify-center gap-1',
+                    'min-w-0 flex-col items-start justify-center gap-1',
                 )}
             >
                 {pendingReassignment && showReassignmentInfo && (
@@ -4062,51 +4140,11 @@ function TaskRow({
                 )}
             </div>
 
-            <div className={cn(cellCls('right'), 'gap-0.5')}>
-                {/* Anyone with project read access can leave a note pinned
-                    to this task or subtask — both manage and read-only
-                    users use the same small TaskNoteDialog. */}
-                {onAddNote && (
-                    <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-7 w-7 text-muted-foreground hover:text-primary"
-                        onClick={onAddNote}
-                        title="Leave a note about this task"
-                        aria-label="Leave a note"
-                    >
-                        <MessageSquarePlus className="h-3.5 w-3.5" />
-                    </Button>
-                )}
-                {/* Per-task show/hide notes — read this task's notes
-                    inline without turning on notes for the whole plan. */}
-                {onToggleNotes && (
-                    <Button
-                        size="icon"
-                        variant="ghost"
-                        className={cn(
-                            'relative h-7 w-7 text-muted-foreground hover:text-primary',
-                            notesOpen && 'text-primary',
-                        )}
-                        onClick={onToggleNotes}
-                        title={notesOpen ? 'Hide notes' : 'Show notes'}
-                        aria-label={notesOpen ? 'Hide notes' : 'Show notes'}
-                    >
-                        {notesOpen ? (
-                            <MessageSquareOff className="h-3.5 w-3.5" />
-                        ) : (
-                            <MessageSquare className="h-3.5 w-3.5" />
-                        )}
-                        {!notesOpen && noteCount > 0 && (
-                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-primary px-0.5 text-[8px] font-bold text-primary-foreground">
-                                {noteCount}
-                            </span>
-                        )}
-                    </Button>
-                )}
-                {/* Log time: shown for admins/managers and for the
-                    task's own assignee. Both use the standalone
-                    LogTimeDialog (small focused form). */}
+            <div className={cn(cellCls('right'), 'gap-0.5 px-1')}>
+                {/* Two quick actions stay visible — log time (admins /
+                    managers / the assignee) and leave a note (anyone with
+                    read access). Everything else moves into the ⋯ menu so
+                    the row stays calm and the column stays narrow. */}
                 {(canManage || isAssignee) && onLogTime && (
                     <Button
                         size="icon"
@@ -4119,61 +4157,105 @@ function TaskRow({
                         <Clock className="h-3.5 w-3.5" />
                     </Button>
                 )}
-                {/* Reassignment proposal — anyone with read access can
-                    suggest a new assignee. The button hides while a
-                    proposal is already pending review (the badge near
-                    the assignee column carries the same info). */}
-                {onProposeReassign && !pendingReassignment && (
+                {onAddNote && (
                     <Button
                         size="icon"
                         variant="ghost"
                         className="h-7 w-7 text-muted-foreground hover:text-primary"
-                        onClick={onProposeReassign}
-                        title="Propose to reassign this task"
-                        aria-label="Propose reassignment"
+                        onClick={onAddNote}
+                        title="Leave a note about this task"
+                        aria-label="Leave a note"
                     >
-                        <UserCog className="h-3.5 w-3.5" />
+                        <MessageSquarePlus className="h-3.5 w-3.5" />
                     </Button>
                 )}
-                {canManage && expandable && (
-                    <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                        onClick={onAddSubtask}
-                        title="Add subtask"
-                        aria-label="Add subtask"
-                    >
-                        <Plus className="h-3.5 w-3.5" />
-                    </Button>
-                )}
-                {rowCanEdit && onDuplicate && (
-                    <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-7 w-7 text-muted-foreground hover:text-primary disabled:opacity-40"
-                        onClick={onDuplicate}
-                        disabled={Boolean(task.specific)}
-                        title={
-                            task.specific
-                                ? "Specific tasks can't be duplicated"
-                                : 'Duplicate this task'
-                        }
-                        aria-label="Duplicate task"
-                    >
-                        <Copy className="h-3.5 w-3.5" />
-                    </Button>
-                )}
-                {rowCanDelete && (
-                    <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                        onClick={onDelete}
-                        aria-label="Delete"
-                    >
-                        <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                {(onToggleNotes ||
+                    (onProposeReassign && !pendingReassignment) ||
+                    (canManage && expandable) ||
+                    rowCanEdit ||
+                    rowCanDelete) && (
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button
+                                size="icon"
+                                variant="ghost"
+                                className={cn(
+                                    'relative h-7 w-7 text-muted-foreground hover:text-foreground',
+                                    notesOpen && 'text-primary',
+                                )}
+                                title="More actions"
+                                aria-label="More actions"
+                            >
+                                <MoreHorizontal className="h-4 w-4" />
+                                {/* Unread-style note count so the signal
+                                    the old inline notes button carried
+                                    isn't lost behind the menu. */}
+                                {!notesOpen && noteCount > 0 && (
+                                    <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-primary px-0.5 text-[8px] font-bold text-primary-foreground">
+                                        {noteCount}
+                                    </span>
+                                )}
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-56">
+                            {onToggleNotes && (
+                                <DropdownMenuItem onClick={onToggleNotes}>
+                                    {notesOpen ? (
+                                        <MessageSquareOff className="mr-2 h-3.5 w-3.5" />
+                                    ) : (
+                                        <MessageSquare className="mr-2 h-3.5 w-3.5" />
+                                    )}
+                                    {notesOpen
+                                        ? 'Hide notes'
+                                        : `Show notes${noteCount ? ` (${noteCount})` : ''}`}
+                                </DropdownMenuItem>
+                            )}
+                            {onProposeReassign && !pendingReassignment && (
+                                <DropdownMenuItem onClick={onProposeReassign}>
+                                    <UserCog className="mr-2 h-3.5 w-3.5" />
+                                    Propose reassignment
+                                </DropdownMenuItem>
+                            )}
+                            {canManage && expandable && (
+                                <DropdownMenuItem onClick={onAddSubtask}>
+                                    <Plus className="mr-2 h-3.5 w-3.5" />
+                                    Add subtask
+                                </DropdownMenuItem>
+                            )}
+                            {rowCanEdit && (
+                                <DropdownMenuItem onClick={onEdit}>
+                                    <Pencil className="mr-2 h-3.5 w-3.5" />
+                                    Edit task
+                                </DropdownMenuItem>
+                            )}
+                            {rowCanEdit && onDuplicate && (
+                                <DropdownMenuItem
+                                    onClick={onDuplicate}
+                                    disabled={Boolean(task.specific)}
+                                    title={
+                                        task.specific
+                                            ? "Specific tasks can't be duplicated"
+                                            : undefined
+                                    }
+                                >
+                                    <Copy className="mr-2 h-3.5 w-3.5" />
+                                    Duplicate
+                                </DropdownMenuItem>
+                            )}
+                            {rowCanDelete && (
+                                <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                        onClick={onDelete}
+                                        className="text-destructive focus:text-destructive"
+                                    >
+                                        <Trash2 className="mr-2 h-3.5 w-3.5" />
+                                        Delete
+                                    </DropdownMenuItem>
+                                </>
+                            )}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
                 )}
             </div>
         </div>

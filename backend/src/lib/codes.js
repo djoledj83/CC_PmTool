@@ -8,9 +8,10 @@
 // Notes:
 //   - Year = project's *creation* year (last two digits). Picked once
 //     and never recomputed.
-//   - Country slot = first three letters of the project's `country`
-//     field, normalized (diacritics stripped, non-letters dropped),
-//     uppercased, padded to 3. Falls back to "INT" when no country.
+//   - Country slot = the country's 3-letter code (lib/countryCodes):
+//     the code set under Templates → Countries, else its ISO 3166
+//     alpha-3 code ("United States" → USA, "Serbia" → SRB), else the
+//     first three letters of the name. "INT" when there's no country.
 //   - Project sequence is scoped to (year, country): "P26-USA-0001"
 //     is independent of "P26-DEU-0001".
 //   - Task / subtask sequences are scoped to the project: each project
@@ -27,6 +28,7 @@ const TASK_PREFIX = 'T';
 const SUBTASK_PREFIX = 'ST';
 const TICKET_PREFIX = 'TKT';
 const COUNTRY_FALLBACK = 'INT';
+const { countryTokenFromName, resolveCountryCode } = require('./countryCodes');
 // CRs are scoped to their parent project and sequence inside it. We
 // pad the per-project counter to 3 digits — most projects will have
 // far fewer CRs than tasks, and "P25-USA-0001-CR-001" reads better
@@ -42,15 +44,11 @@ function pad(n) {
     return s.length >= PAD ? s : s.padStart(PAD, '0');
 }
 
+// Name-only token (no catalogue lookup): ISO alpha-3, else the first
+// three letters, else INT. generateProjectCode uses the full resolver.
 function countryToken(country) {
     if (!country) return COUNTRY_FALLBACK;
-    const cleaned = String(country)
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^A-Za-z]/g, '')
-        .toUpperCase();
-    if (!cleaned) return COUNTRY_FALLBACK;
-    return cleaned.slice(0, 3).padEnd(3, 'X');
+    return countryTokenFromName(country);
 }
 
 function yearToken(date) {
@@ -164,7 +162,7 @@ async function generateTicketCode(prisma) {
 
 async function generateProjectCode(prisma, { country, createdAt } = {}) {
     const yy = String(yearToken(createdAt)).padStart(2, '0');
-    const cc = countryToken(country);
+    const cc = await resolveCountryCode(prisma, country);
     const seq = await nextProjectSequence(prisma, yy, cc);
     return `${PROJECT_PREFIX}${yy}-${cc}-${pad(seq)}`;
 }

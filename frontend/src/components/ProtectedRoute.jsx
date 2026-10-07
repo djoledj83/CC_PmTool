@@ -16,6 +16,10 @@ export function ProtectedRoute({
     // Without this, granting e.g. `team:manage` to a USER did nothing
     // because they were still bounced at /teams by the role gate.
     requiredCapability = null,
+    // Hard requirement: the user MUST hold this capability to enter,
+    // regardless of role (used for restricted / super-admin surfaces like
+    // the Logs page, which even admins don't see unless explicitly granted).
+    strictCapability = null,
 }) {
     const { user, loading } = useAuth();
     const location = useLocation();
@@ -30,6 +34,11 @@ export function ProtectedRoute({
 
     if (!user) {
         return <Navigate to="/login" state={{ from: location }} replace />;
+    }
+
+    // Hard capability gate — no role bypasses it.
+    if (strictCapability && !hasCapability(user, strictCapability)) {
+        return <Navigate to="/projects" replace />;
     }
 
     // Capability shortcut: any matching cap unblocks the route even

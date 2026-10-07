@@ -3,6 +3,14 @@ const realtime = require('./realtime');
 const { sendTemplate, appLink, APP_NAME } = require('./mailer');
 const { pushToUsers } = require('./push');
 
+// Notification types that belong to a ticket (meta.ticketId).
+const TICKET_NOTIFICATION_TYPES = [
+    'TICKET_CREATED',
+    'TICKET_COMMENT',
+    'TICKET_ASSIGNED',
+    'TICKET_STATUS_CHANGED',
+];
+
 // Notification types we never want to email about (chat is too chatty for
 // inbox notifications by default).
 const EMAIL_BLOCKLIST = new Set(['MESSAGE_RECEIVED']);
@@ -27,6 +35,21 @@ const SUBJECT_PREFIX = {
     TASK_REASSIGN_APPROVED: '[Reassign]',
     TASK_REASSIGN_REJECTED: '[Reassign]',
 };
+
+// What a portal (requester) account may see of a notification: no staff
+// e-mail address, no project, no "[P26-…]" code prefix.
+function forPortal(n) {
+    if (!n) return n;
+    return {
+        ...n,
+        title: typeof n.title === 'string' ? n.title.replace(/^\[[^\]]*\]\s*/, '') : n.title,
+        actor: n.actor
+            ? { id: n.actor.id, name: n.actor.name, avatarUrl: n.actor.avatarUrl || null }
+            : n.actor,
+        project: null,
+        projectId: null,
+    };
+}
 
 const notificationInclude = {
     actor: {
@@ -230,6 +253,18 @@ async function notify({
     const enrichedTitle =
         codePrefix && title ? `${codePrefix}${title}` : title;
 
+    // Portal (requester) accounts never get workspace context: no project
+    // code prefix, no project on the row and no staff e-mail addresses.
+    const portalIds = new Set(
+        (
+            await prisma.user.findMany({
+                where: { id: { in: recipients }, role: 'REQUESTER' },
+                select: { id: true },
+            })
+        ).map((u) => u.id),
+    );
+    const titleFor = (userId) => (portalIds.has(userId) ? title : enrichedTitle);
+
     // createMany doesn't return rows on Postgres, so we create one-by-one to
     // get the records back. The volume here is small (handful of recipients).
     const created = await Promise.all(
@@ -239,10 +274,10 @@ async function notify({
                     userId,
                     actorId: actorId || null,
                     type,
-                    title: enrichedTitle,
+                    title: titleFor(userId),
                     body: body || null,
                     link,
-                    projectId: projectId || null,
+                    projectId: portalIds.has(userId) ? null : projectId || null,
                     meta: finalMeta,
                 },
                 include: notificationInclude,
@@ -251,16 +286,32 @@ async function notify({
     );
 
     for (const n of created) {
-        realtime.emitToUser(n.userId, 'notification:new', n);
+        realtime.emitToUser(
+            n.userId,
+            'notification:new',
+            portalIds.has(n.userId) ? forPortal(n) : n,
+        );
     }
 
     // Mobile push fan-out (fire-and-forget). Each recipient's devices
     // get a push with the link + type in `data` so a tap can deep-link.
-    pushToUsers(recipients, {
-        title: enrichedTitle,
-        body: body || '',
-        data: { link, type, ...(finalMeta || {}) },
-    }).catch((err) => console.warn('[notify] push fan-out failed:', err.message));
+    const pushData = { link, type, ...(finalMeta || {}) };
+    const staffRecipients = recipients.filter((id) => !portalIds.has(id));
+    const portalRecipients = recipients.filter((id) => portalIds.has(id));
+    if (staffRecipients.length) {
+        pushToUsers(staffRecipients, {
+            title: enrichedTitle,
+            body: body || '',
+            data: pushData,
+        }).catch((err) => console.warn('[notify] push fan-out failed:', err.message));
+    }
+    if (portalRecipients.length) {
+        pushToUsers(portalRecipients, {
+            title,
+            body: body || '',
+            data: pushData,
+        }).catch((err) => console.warn('[notify] push fan-out failed:', err.message));
+    }
 
     // Apply the optional email filter. An explicit empty array means
     // "in-app only" (don't email anyone); undefined keeps the previous
@@ -490,7 +541,7 @@ async function clearTicketNotificationsForTicket(userId, ticketId) {
         where: {
             userId,
             read: false,
-            type: { in: ['TICKET_CREATED', 'TICKET_COMMENT', 'TICKET_ASSIGNED'] },
+            type: { in: TICKET_NOTIFICATION_TYPES },
             meta: { path: ['ticketId'], equals: ticketId },
         },
         select: { id: true },
@@ -526,7 +577,7 @@ async function ticketsWithUnreadActivity(userId, ticketIds) {
         where: {
             userId,
             read: false,
-            type: { in: ['TICKET_CREATED', 'TICKET_COMMENT', 'TICKET_ASSIGNED'] },
+            type: { in: TICKET_NOTIFICATION_TYPES },
         },
         select: { meta: true },
     });
@@ -567,4 +618,5 @@ module.exports = {
     clearChatNotificationsForConversation,
     clearTicketNotificationsForTicket,
     ticketsWithUnreadActivity,
+    forPortal,
 };

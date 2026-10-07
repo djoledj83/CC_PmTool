@@ -3,7 +3,12 @@
 // collected values up via `onChange`:
 //   { fields, clientId, terminalModelId, fieldValues: [{fieldId, value}] }
 // The parent enforces the required ones and sends the values on submit.
+//
+// `trailing` (optional): extra form cells the parent wants on the LAST row
+// — the Client field moves there too, so the raise form can show
+// "Client | Share with | Attachments" on one line under the terminal.
 import { useEffect, useMemo, useState } from 'react';
+import { Box, Building2, Monitor, UserRound } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -19,10 +24,24 @@ import {
 
 const OS_LABEL = { LINUX: 'Linux', ANDROID: 'Android' };
 
+// Select trigger content with a leading icon. A <div>, not a <span>: the
+// shadcn trigger line-clamps its direct <span> children (display:
+// -webkit-box), which would stack the icon above the text.
+function IconValue({ icon: Icon, placeholder }) {
+    return (
+        <div className="flex min-w-0 items-center gap-2 [&>span]:truncate">
+            <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <SelectValue placeholder={placeholder} />
+        </div>
+    );
+}
+
 export default function TicketCustomFields({
     requestTypeId,
     onChange,
     hideClientField = false,
+    trailing = null,
+    labelClassName = 'text-xs',
 }) {
     const [fields, setFields] = useState([]);
     const [allModels, setAllModels] = useState([]); // every terminal model
@@ -53,7 +72,9 @@ export default function TicketCustomFields({
                         )
                         .catch(() => {});
                 }
-                if (list.some((f) => f.type === 'CLIENT')) {
+                // External requesters never pick a client (theirs is used),
+                // and the client list isn't theirs to see.
+                if (!hideClientField && list.some((f) => f.type === 'CLIENT')) {
                     api.get('/clients')
                         .then(({ data: d }) =>
                             !cancelled && setClients(d.clients || []),
@@ -67,7 +88,7 @@ export default function TicketCustomFields({
         return () => {
             cancelled = true;
         };
-    }, [requestTypeId]);
+    }, [requestTypeId, hideClientField]);
 
     // OS → Vendor → Model, all derived from the loaded models. Picking an
     // OS narrows the vendors; picking a vendor narrows the models.
@@ -119,7 +140,10 @@ export default function TicketCustomFields({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [visibleFields, clientId, terminalModelId, values]);
 
-    if (visibleFields.length === 0) return null;
+    const trailingCells = (Array.isArray(trailing) ? trailing : [trailing]).filter(
+        Boolean,
+    );
+    if (visibleFields.length === 0 && trailingCells.length === 0) return null;
 
     const toggleOption = (fieldId, opt) =>
         setValues((prev) => {
@@ -132,207 +156,220 @@ export default function TicketCustomFields({
             };
         });
 
+    const labelFor = (f) => (
+        <Label className={labelClassName}>
+            {f.label}
+            {f.required && <span className="text-rose-500"> *</span>}
+        </Label>
+    );
+
+    const renderClient = (f) => (
+        <div key={f.id} className="min-w-0 space-y-1.5">
+            {labelFor(f)}
+            <Select value={clientId} onValueChange={setClientId}>
+                <SelectTrigger className="h-10 text-sm">
+                    <IconValue icon={UserRound} placeholder="Select a client" />
+                </SelectTrigger>
+                <SelectContent>
+                    {clients.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                            {c.name}
+                        </SelectItem>
+                    ))}
+                </SelectContent>
+            </Select>
+        </div>
+    );
+
+    // With `trailing`, the Client field joins the last row instead.
+    const clientInTrailing = trailingCells.length > 0;
+    const clientFields = clientInTrailing
+        ? visibleFields.filter((f) => f.type === 'CLIENT')
+        : [];
+    const gridFields = clientInTrailing
+        ? visibleFields.filter((f) => f.type !== 'CLIENT')
+        : visibleFields;
+    const lastRow = [...clientFields.map(renderClient), ...trailingCells];
+
     return (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {visibleFields.map((f) => {
-                const req = f.required && (
-                    <span className="text-rose-500"> *</span>
-                );
-                if (f.type === 'TERMINAL') {
-                    return (
-                        <div
-                            key={f.id}
-                            className="space-y-1.5 sm:col-span-2 lg:col-span-4"
-                        >
-                            <Label className="text-xs">
-                                {f.label}
-                                {req}
-                            </Label>
-                            <div className="grid grid-cols-3 gap-2">
-                                <Select
-                                    value={osType}
-                                    onValueChange={(v) => {
-                                        setOsType(v);
-                                        setVendorId('');
-                                        setTerminalModelId('');
-                                    }}
+        <div className="space-y-4">
+            {gridFields.length > 0 && (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    {gridFields.map((f) => {
+                        if (f.type === 'TERMINAL') {
+                            return (
+                                <div
+                                    key={f.id}
+                                    className="space-y-1.5 sm:col-span-2 lg:col-span-4"
                                 >
-                                    <SelectTrigger className="text-sm">
-                                        <SelectValue placeholder="OS" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        <SelectItem value="LINUX">
-                                            {OS_LABEL.LINUX}
-                                        </SelectItem>
-                                        <SelectItem value="ANDROID">
-                                            {OS_LABEL.ANDROID}
-                                        </SelectItem>
-                                    </SelectContent>
-                                </Select>
-                                <Select
-                                    value={vendorId}
-                                    onValueChange={(v) => {
-                                        setVendorId(v);
-                                        setTerminalModelId('');
-                                    }}
-                                    disabled={!osType}
-                                >
-                                    <SelectTrigger className="text-sm">
-                                        <SelectValue placeholder="Vendor" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {vendorOptions.map((v) => (
-                                            <SelectItem key={v.id} value={v.id}>
-                                                {v.name}
-                                            </SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
-                                <Select
-                                    value={terminalModelId}
-                                    onValueChange={setTerminalModelId}
-                                    disabled={!vendorId}
-                                >
-                                    <SelectTrigger className="text-sm">
-                                        <SelectValue placeholder="Model" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {modelOptions.map((m) => (
-                                            <SelectItem key={m.id} value={m.id}>
-                                                {m.name}
-                                            </SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
-                            </div>
-                        </div>
-                    );
-                }
-                if (f.type === 'CLIENT') {
-                    return (
-                        <div key={f.id} className="space-y-1.5">
-                            <Label className="text-xs">
-                                {f.label}
-                                {req}
-                            </Label>
-                            <Select
-                                value={clientId}
-                                onValueChange={setClientId}
-                            >
-                                <SelectTrigger className="text-sm">
-                                    <SelectValue placeholder="Select a client" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    {clients.map((c) => (
-                                        <SelectItem key={c.id} value={c.id}>
-                                            {c.name}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-                        </div>
-                    );
-                }
-                if (f.type === 'SELECT') {
-                    const opts = Array.isArray(f.options) ? f.options : [];
-                    const sel = Array.isArray(values[f.id]) ? values[f.id] : [];
-                    return (
-                        <div
-                            key={f.id}
-                            className="space-y-1.5 sm:col-span-2 lg:col-span-4"
-                        >
-                            <Label className="text-xs">
-                                {f.label}
-                                {req}
-                            </Label>
-                            <div className="flex flex-wrap gap-1.5">
-                                {opts.map((o) => {
-                                    const on = sel.includes(o);
-                                    return (
-                                        <button
-                                            key={o}
-                                            type="button"
-                                            onClick={() =>
-                                                toggleOption(f.id, o)
-                                            }
-                                            className={
-                                                'rounded-full border px-2.5 py-1 text-xs transition-colors ' +
-                                                (on
-                                                    ? 'border-primary bg-primary text-primary-foreground'
-                                                    : 'hover:bg-accent')
-                                            }
+                                    {labelFor(f)}
+                                    <div className="grid gap-2 sm:grid-cols-3">
+                                        <Select
+                                            value={osType}
+                                            onValueChange={(v) => {
+                                                setOsType(v);
+                                                setVendorId('');
+                                                setTerminalModelId('');
+                                            }}
                                         >
-                                            {o}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    );
-                }
-                if (f.type === 'YESNO') {
-                    const v = values[f.id];
-                    return (
-                        <div key={f.id} className="space-y-1.5">
-                            <Label className="text-xs">
-                                {f.label}
-                                {req}
-                            </Label>
-                            <div>
-                                {/* Compact segmented toggle — sized to its
-                                    content, not full width. */}
-                                <div className="inline-flex rounded-md border p-0.5">
-                                    {[
-                                        { val: true, label: 'Yes' },
-                                        { val: false, label: 'No' },
-                                    ].map((opt) => {
-                                        const on = v === opt.val;
-                                        return (
-                                            <button
-                                                key={opt.label}
-                                                type="button"
-                                                onClick={() =>
-                                                    setValues((prev) => ({
-                                                        ...prev,
-                                                        [f.id]: opt.val,
-                                                    }))
-                                                }
-                                                className={cn(
-                                                    'rounded px-4 py-1 text-xs font-medium transition-colors',
-                                                    on
-                                                        ? 'bg-primary text-primary-foreground'
-                                                        : 'text-muted-foreground hover:text-foreground',
-                                                )}
-                                            >
-                                                {opt.label}
-                                            </button>
-                                        );
-                                    })}
+                                            <SelectTrigger className="h-10 text-sm">
+                                                <IconValue icon={Monitor} placeholder="OS" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="LINUX">
+                                                    {OS_LABEL.LINUX}
+                                                </SelectItem>
+                                                <SelectItem value="ANDROID">
+                                                    {OS_LABEL.ANDROID}
+                                                </SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                        <Select
+                                            value={vendorId}
+                                            onValueChange={(v) => {
+                                                setVendorId(v);
+                                                setTerminalModelId('');
+                                            }}
+                                            disabled={!osType}
+                                        >
+                                            <SelectTrigger className="h-10 text-sm">
+                                                <IconValue icon={Building2} placeholder="Vendor" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {vendorOptions.map((v) => (
+                                                    <SelectItem key={v.id} value={v.id}>
+                                                        {v.name}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                        <Select
+                                            value={terminalModelId}
+                                            onValueChange={setTerminalModelId}
+                                            disabled={!vendorId}
+                                        >
+                                            <SelectTrigger className="h-10 text-sm">
+                                                <IconValue icon={Box} placeholder="Model" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {modelOptions.map((m) => (
+                                                    <SelectItem key={m.id} value={m.id}>
+                                                        {m.name}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
                                 </div>
+                            );
+                        }
+                        if (f.type === 'CLIENT') return renderClient(f);
+                        if (f.type === 'SELECT') {
+                            const opts = Array.isArray(f.options) ? f.options : [];
+                            const sel = Array.isArray(values[f.id]) ? values[f.id] : [];
+                            return (
+                                <div
+                                    key={f.id}
+                                    className="space-y-1.5 sm:col-span-2 lg:col-span-4"
+                                >
+                                    {labelFor(f)}
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {opts.map((o) => {
+                                            const on = sel.includes(o);
+                                            return (
+                                                <button
+                                                    key={o}
+                                                    type="button"
+                                                    onClick={() => toggleOption(f.id, o)}
+                                                    className={
+                                                        'rounded-full border px-2.5 py-1 text-xs transition-colors ' +
+                                                        (on
+                                                            ? 'border-primary bg-primary text-primary-foreground'
+                                                            : 'hover:bg-accent')
+                                                    }
+                                                >
+                                                    {o}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            );
+                        }
+                        if (f.type === 'YESNO') {
+                            const v = values[f.id];
+                            return (
+                                <div key={f.id} className="space-y-1.5">
+                                    {labelFor(f)}
+                                    <div>
+                                        {/* Compact segmented toggle — sized to
+                                            its content, not full width. */}
+                                        <div className="inline-flex rounded-md border p-0.5">
+                                            {[
+                                                { val: true, label: 'Yes' },
+                                                { val: false, label: 'No' },
+                                            ].map((opt) => {
+                                                const on = v === opt.val;
+                                                return (
+                                                    <button
+                                                        key={opt.label}
+                                                        type="button"
+                                                        onClick={() =>
+                                                            setValues((prev) => ({
+                                                                ...prev,
+                                                                [f.id]: opt.val,
+                                                            }))
+                                                        }
+                                                        className={cn(
+                                                            'rounded px-4 py-1 text-xs font-medium transition-colors',
+                                                            on
+                                                                ? 'bg-primary text-primary-foreground'
+                                                                : 'text-muted-foreground hover:text-foreground',
+                                                        )}
+                                                    >
+                                                        {opt.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        }
+                        // TEXT
+                        return (
+                            <div key={f.id} className="space-y-1.5">
+                                {labelFor(f)}
+                                <Input
+                                    value={values[f.id] || ''}
+                                    onChange={(e) =>
+                                        setValues((prev) => ({
+                                            ...prev,
+                                            [f.id]: e.target.value,
+                                        }))
+                                    }
+                                    placeholder={f.label}
+                                    className="h-10"
+                                />
                             </div>
-                        </div>
-                    );
-                }
-                // TEXT
-                return (
-                    <div key={f.id} className="space-y-1.5">
-                        <Label className="text-xs">
-                            {f.label}
-                            {req}
-                        </Label>
-                        <Input
-                            value={values[f.id] || ''}
-                            onChange={(e) =>
-                                setValues((prev) => ({
-                                    ...prev,
-                                    [f.id]: e.target.value,
-                                }))
-                            }
-                            placeholder={f.label}
-                        />
-                    </div>
-                );
-            })}
+                        );
+                    })}
+                </div>
+            )}
+            {lastRow.length > 0 && (
+                <div
+                    className={cn(
+                        'grid items-start gap-3',
+                        lastRow.length >= 3
+                            ? 'md:grid-cols-3'
+                            : lastRow.length === 2
+                              ? 'md:grid-cols-2'
+                              : '',
+                    )}
+                >
+                    {lastRow}
+                </div>
+            )}
         </div>
     );
 }

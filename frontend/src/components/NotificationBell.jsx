@@ -28,14 +28,16 @@ const TICKET_TYPES = new Set([
     'TICKET_CREATED',
     'TICKET_COMMENT',
     'TICKET_ASSIGNED',
+    'TICKET_STATUS_CHANGED',
 ]);
 
 export function NotificationBell({ ticketsOnly = false }) {
     const navigate = useNavigate();
     const {
-        unreadNotifications,
+        unseenNotifications,
         recentNotifications,
         markNotificationsRead,
+        markNotificationsSeen,
         refreshCounts,
     } = useRealtime();
     const [open, setOpen] = useState(false);
@@ -48,19 +50,31 @@ export function NotificationBell({ ticketsOnly = false }) {
     useEffect(() => {
         if (!open) return;
         // When the popover opens, fetch a fresh list (in case the user came
-        // back after the connection was idle).
+        // back after the connection was idle), then stamp everything as
+        // SEEN: the badge number goes away, but each item stays bold until
+        // the user actually clicks it (which marks it READ).
         api.get('/notifications', { params: { limit: 20 } })
             .then((res) => setItems(res.data.notifications || []))
-            .catch(() => {});
-    }, [open]);
+            .catch(() => {})
+            .finally(() => {
+                const stamp = new Date().toISOString();
+                setItems((prev) =>
+                    prev.map((n) => (n.seenAt ? n : { ...n, seenAt: stamp })),
+                );
+                markNotificationsSeen?.();
+            });
+    }, [open, markNotificationsSeen]);
 
     // On the portal we only surface ticket notifications — nothing else.
     const visibleItems = ticketsOnly
         ? items.filter((n) => TICKET_TYPES.has(n.type))
         : items;
+    // Badge = "arrived since you last opened the bell" (unseen), NOT
+    // "never clicked" (unread) — so it clears as soon as the list is opened.
     const badgeCount = ticketsOnly
-        ? visibleItems.filter((n) => !n.read).length
-        : unreadNotifications;
+        ? visibleItems.filter((n) => !n.seenAt).length
+        : unseenNotifications;
+    const hasUnread = visibleItems.some((n) => !n.read);
 
     const handleOpen = (n) => {
         setOpen(false);
@@ -145,7 +159,7 @@ export function NotificationBell({ ticketsOnly = false }) {
                         variant="ghost"
                         className="h-7 gap-1 px-2 text-xs"
                         onClick={markAll}
-                        disabled={badgeCount === 0}
+                        disabled={!hasUnread}
                     >
                         <CheckCheck className="h-3.5 w-3.5" />
                         Mark all read
@@ -186,7 +200,17 @@ export function NotificationBell({ ticketsOnly = false }) {
                                             {/* Line 1: "[P… / T…] project name"
                                                 (the code-prefixed title from
                                                 the backend). */}
-                                            <p className="truncate text-sm font-medium">
+                                            {/* Unopened notifications read
+                                                bold; once clicked (read) they
+                                                drop to normal weight. */}
+                                            <p
+                                                className={cn(
+                                                    'truncate text-sm',
+                                                    n.read
+                                                        ? 'font-normal text-foreground/80'
+                                                        : 'font-bold text-foreground',
+                                                )}
+                                            >
                                                 {n.title}
                                             </p>
                                             {/* Line 2: the task name (and, for
@@ -194,7 +218,14 @@ export function NotificationBell({ ticketsOnly = false }) {
                                                 lives under) — the piece that
                                                 was previously missing. */}
                                             {n.task?.title && (
-                                                <p className="mt-0.5 truncate text-xs font-medium text-foreground/90">
+                                                <p
+                                                    className={cn(
+                                                        'mt-0.5 truncate text-xs text-foreground/90',
+                                                        n.read
+                                                            ? 'font-normal'
+                                                            : 'font-semibold',
+                                                    )}
+                                                >
                                                     {n.task.parent?.title
                                                         ? `${n.task.parent.title} › ${n.task.title}`
                                                         : n.task.title}
@@ -202,7 +233,14 @@ export function NotificationBell({ ticketsOnly = false }) {
                                             )}
                                             {/* Line 3+: all other details. */}
                                             {n.body && (
-                                                <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                                                <p
+                                                    className={cn(
+                                                        'mt-0.5 line-clamp-2 text-xs',
+                                                        n.read
+                                                            ? 'text-muted-foreground'
+                                                            : 'font-medium text-foreground/80',
+                                                    )}
+                                                >
                                                     {n.body}
                                                 </p>
                                             )}

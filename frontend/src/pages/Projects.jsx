@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import {
+    ArrowUpDown,
     Check,
     ChevronDown,
     Download,
@@ -82,6 +83,8 @@ import {
     DropdownMenuContent,
     DropdownMenuItem,
     DropdownMenuLabel,
+    DropdownMenuRadioGroup,
+    DropdownMenuRadioItem,
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
@@ -184,6 +187,77 @@ const DEFAULT_VISIBILITY = {
     showOnHold: true,
 };
 
+// Sort order for the project list. 'custom' keeps the user's personal
+// drag order (the original behaviour, and the only mode where drag-to-
+// reorder is allowed). Remembered per browser.
+const STORAGE_SORT = 'pm.projects.sort.v1';
+const SORT_OPTIONS = [
+    { id: 'custom', label: 'Custom order', hint: 'Your drag-and-drop order' },
+    { id: 'newest', label: 'Newest first', hint: 'Most recently created' },
+    { id: 'oldest', label: 'Oldest first', hint: 'Created longest ago' },
+    { id: 'ending', label: 'Ending soonest', hint: 'By end date — overdue first, completed last' },
+    { id: 'starting', label: 'Starting soonest', hint: 'By start date' },
+    { id: 'updated', label: 'Recently updated', hint: 'Last changed first' },
+    { id: 'name', label: 'Name A–Z', hint: 'Alphabetical' },
+];
+const SORT_IDS = new Set(SORT_OPTIONS.map((o) => o.id));
+
+function readSortMode() {
+    try {
+        const saved = localStorage.getItem(STORAGE_SORT);
+        return SORT_IDS.has(saved) ? saved : 'custom';
+    } catch {
+        return 'custom';
+    }
+}
+
+// Timestamp for a date field; missing dates sort LAST in both directions.
+function ts(value, missing) {
+    if (!value) return missing;
+    const t = new Date(value).getTime();
+    return Number.isFinite(t) ? t : missing;
+}
+
+const byName = (a, b) =>
+    (a.name || '').localeCompare(b.name || '', undefined, {
+        numeric: true,
+        sensitivity: 'base',
+    });
+
+// Returns a NEW sorted array (never mutates). Ties fall back to name so
+// the order is stable and predictable.
+function sortProjects(list, mode) {
+    if (mode === 'custom' || !Array.isArray(list)) return list;
+    const out = [...list];
+    const asc = (field) => (a, b) =>
+        ts(a[field], Infinity) - ts(b[field], Infinity) || byName(a, b);
+    const desc = (field) => (a, b) =>
+        ts(b[field], -Infinity) - ts(a[field], -Infinity) || byName(a, b);
+    switch (mode) {
+        case 'newest':
+            return out.sort(desc('createdAt'));
+        case 'oldest':
+            return out.sort(asc('createdAt'));
+        case 'ending':
+            // "What's expiring": active projects first (a finished project
+            // with a past end date isn't urgent), then by end date — so
+            // overdue ones lead — and projects with no end date last.
+            return out.sort((a, b) => {
+                const da = a.status === 'DONE' ? 1 : 0;
+                const db = b.status === 'DONE' ? 1 : 0;
+                return da - db || asc('endDate')(a, b);
+            });
+        case 'starting':
+            return out.sort(asc('startDate'));
+        case 'updated':
+            return out.sort(desc('updatedAt'));
+        case 'name':
+            return out.sort(byName);
+        default:
+            return list;
+    }
+}
+
 export default function Projects() {
     const { user: currentUser } = useAuth();
     const isAdmin = currentUser?.role === 'ADMIN';
@@ -246,6 +320,18 @@ export default function Projects() {
         setView(v);
         try {
             localStorage.setItem('projects.view', v);
+        } catch {
+            /* ignore */
+        }
+    };
+
+    // List sort order (see SORT_OPTIONS). Remembered per browser.
+    const [sortMode, setSortMode] = useState(readSortMode);
+    const changeSort = (mode) => {
+        if (!SORT_IDS.has(mode)) return;
+        setSortMode(mode);
+        try {
+            localStorage.setItem(STORAGE_SORT, mode);
         } catch {
             /* ignore */
         }
@@ -403,7 +489,7 @@ export default function Projects() {
         return set;
     }, [groupIds, groups]);
 
-    const filtered = useMemo(() => {
+    const filteredUnsorted = useMemo(() => {
         const search = filters.search.trim().toLowerCase();
         return orderedProjects.filter((p) => {
             // Group filter (from the toolbar / sidebar) — narrow to the
@@ -518,10 +604,19 @@ export default function Projects() {
         });
     }, [orderedProjects, filters, visibility, findProjectPriority, findProjectStatus, projectPinHook, groupProjectIds]);
 
+    // Apply the chosen sort AFTER filtering. Every render site (table,
+    // cards, counts, select-all) reads `filtered`, so they all follow it.
+    const filtered = useMemo(
+        () => sortProjects(filteredUnsorted, sortMode),
+        [filteredUnsorted, sortMode],
+    );
+
     // Reordering is only safe when nothing is hidden — otherwise a drag
-    // could move a row past projects the user can't see. So drag is
-    // enabled only when the visible list is the whole list.
-    const reorderEnabled = filtered.length === orderedProjects.length;
+    // could move a row past projects the user can't see — AND only in
+    // "Custom order": under any other sort the on-screen order isn't the
+    // saved order, so a drag would be meaningless.
+    const reorderEnabled =
+        sortMode === 'custom' && filtered.length === orderedProjects.length;
 
     const handleRowDrop = (targetId) => {
         if (!dragId || dragId === targetId) {
@@ -1171,6 +1266,58 @@ export default function Projects() {
                             <span className="text-foreground">On hold</span>
                         </Label>
                     </div>
+
+                    {/* Sort order — radio menu; the button shows the active
+                        choice so it's obvious when a non-custom sort is on
+                        (which also switches off drag-to-reorder). */}
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className={cn(
+                                    'gap-2',
+                                    sortMode !== 'custom' &&
+                                        'border-primary/50 text-primary',
+                                )}
+                                title="Sort projects"
+                            >
+                                <ArrowUpDown className="h-4 w-4" />
+                                {SORT_OPTIONS.find((o) => o.id === sortMode)
+                                    ?.label || 'Sort'}
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-64">
+                            <DropdownMenuLabel>Sort projects by</DropdownMenuLabel>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuRadioGroup
+                                value={sortMode}
+                                onValueChange={changeSort}
+                            >
+                                {SORT_OPTIONS.map((o) => (
+                                    <DropdownMenuRadioItem
+                                        key={o.id}
+                                        value={o.id}
+                                        className="flex-col items-start gap-0"
+                                    >
+                                        <span>{o.label}</span>
+                                        <span className="text-[11px] text-muted-foreground">
+                                            {o.hint}
+                                        </span>
+                                    </DropdownMenuRadioItem>
+                                ))}
+                            </DropdownMenuRadioGroup>
+                            {sortMode !== 'custom' && (
+                                <>
+                                    <DropdownMenuSeparator />
+                                    <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                                        Drag-to-reorder works in Custom order
+                                        only.
+                                    </p>
+                                </>
+                            )}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
 
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>

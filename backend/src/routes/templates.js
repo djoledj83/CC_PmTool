@@ -164,6 +164,50 @@ router.post('/phases/reorder', requireAdmin, async (req, res, next) => {
 // each TaskPriority/ProjectPriority enum value).
 // =====================================================================
 
+// Keys the data model gives meaning to (lib/optionKeys). Task status and
+// task / project priority are database enums, so those scopes are CLOSED
+// sets — their rows only change how the values look (label, colour,
+// order, hidden). Project statuses are free text: admins may add their
+// own next to six built-in keys the code relies on. Built-in rows can't
+// be deleted (hide them instead); task statuses can't even be hidden.
+const { BUILTIN_OPTION_KEYS, isClosedScope } = require('../lib/optionKeys');
+const { countryTokenFromName } = require('../lib/countryCodes');
+
+function optionFlags(kind, row) {
+    const builtIn = (BUILTIN_OPTION_KEYS[kind]?.[row.scope] || []).includes(row.key);
+    return {
+        ...row,
+        builtIn,
+        // Can a task / project actually be saved with this key?
+        supported: builtIn || !isClosedScope(kind, row.scope),
+        // Task statuses are always offered — every task needs them.
+        alwaysVisible: kind === 'statuses' && row.scope === 'TASK',
+    };
+}
+
+function closedScopeError(kind, scope) {
+    const what = `${scope === 'TASK' ? 'Task' : 'Project'} ${kind}`;
+    const keys = (BUILTIN_OPTION_KEYS[kind]?.[scope] || []).join(', ');
+    return httpError(
+        400,
+        `${what} are a fixed set (${keys}) — rename, recolour or reorder them instead.`,
+    );
+}
+
+async function assertDeletable(kind, model, id) {
+    const row = await prisma[model].findUnique({ where: { id } });
+    if (!row) return; // the delete reports the 404
+    const flags = optionFlags(kind, row);
+    if (flags.builtIn) {
+        throw httpError(
+            400,
+            flags.alwaysVisible
+                ? 'Task statuses are built in and can’t be deleted — rename or recolour them instead.'
+                : `“${row.label}” is built in and can’t be deleted — switch it off to hide it.`,
+        );
+    }
+}
+
 const PRIORITY_SCOPES = ['TASK', 'PROJECT'];
 // Whitelist of color tokens the frontend understands. Keeps user input
 // from injecting arbitrary class strings.
@@ -204,7 +248,7 @@ router.get('/priorities', async (req, res, next) => {
             where,
             orderBy: [{ scope: 'asc' }, { order: 'asc' }, { label: 'asc' }],
         });
-        res.json({ priorities });
+        res.json({ priorities: priorities.map((p) => optionFlags('priorities', p)) });
     } catch (err) {
         next(err);
     }
@@ -213,6 +257,11 @@ router.get('/priorities', async (req, res, next) => {
 router.post('/priorities', requireAdmin, async (req, res, next) => {
     try {
         const data = priorityCreateSchema.parse(req.body);
+        // Task.priority / Project.priority are enums — a new key could be
+        // picked but never saved.
+        if (isClosedScope('priorities', data.scope)) {
+            throw closedScopeError('priorities', data.scope);
+        }
         const last = await prisma.priorityOption.findFirst({
             where: { scope: data.scope },
             orderBy: { order: 'desc' },
@@ -229,7 +278,7 @@ router.post('/priorities', requireAdmin, async (req, res, next) => {
                 isActive: data.isActive ?? true,
             },
         });
-        res.status(201).json({ priority });
+        res.status(201).json({ priority: optionFlags('priorities', priority) });
     } catch (err) {
         if (err.code === 'P2002') {
             return next(
@@ -252,7 +301,7 @@ router.patch('/priorities/:id', requireAdmin, async (req, res, next) => {
             where: { id: req.params.id },
             data: updateData,
         });
-        res.json({ priority });
+        res.json({ priority: optionFlags('priorities', priority) });
     } catch (err) {
         if (err.code === 'P2025') return next(httpError(404, 'Priority not found'));
         next(err);
@@ -261,6 +310,7 @@ router.patch('/priorities/:id', requireAdmin, async (req, res, next) => {
 
 router.delete('/priorities/:id', requireAdmin, async (req, res, next) => {
     try {
+        await assertDeletable('priorities', 'priorityOption', req.params.id);
         await prisma.priorityOption.delete({ where: { id: req.params.id } });
         res.json({ ok: true });
     } catch (err) {
@@ -289,7 +339,7 @@ router.post('/priorities/reorder', requireAdmin, async (req, res, next) => {
             where: { scope },
             orderBy: [{ order: 'asc' }, { label: 'asc' }],
         });
-        res.json({ priorities });
+        res.json({ priorities: priorities.map((p) => optionFlags('priorities', p)) });
     } catch (err) {
         next(err);
     }
@@ -301,8 +351,8 @@ router.post('/priorities/reorder', requireAdmin, async (req, res, next) => {
 // PriorityOption notes for why we keep the enum as the source of truth
 // and treat this table as the display layer.
 //
-// Only PROJECT scope is wired today; the column is left flexible so a
-// future TASK scope is a single extra row set away.
+// TASK scope is a closed set (Task.status is an enum): its four rows are
+// seeded at boot and only restyle the built-in values.
 // =====================================================================
 
 const STATUS_SCOPES = ['PROJECT', 'TASK'];
@@ -336,7 +386,7 @@ router.get('/statuses', async (req, res, next) => {
             where,
             orderBy: [{ scope: 'asc' }, { order: 'asc' }, { label: 'asc' }],
         });
-        res.json({ statuses });
+        res.json({ statuses: statuses.map((st) => optionFlags('statuses', st)) });
     } catch (err) {
         next(err);
     }
@@ -350,11 +400,8 @@ router.post('/statuses', requireAdmin, async (req, res, next) => {
         // task API validates against, so a custom TASK status would be
         // selectable but rejected on save. Block creating them until task
         // status is converted to free-form.
-        if (data.scope === 'TASK') {
-            throw httpError(
-                400,
-                'Custom task statuses are not supported yet — task statuses are fixed.',
-            );
+        if (isClosedScope('statuses', data.scope)) {
+            throw closedScopeError('statuses', data.scope);
         }
         const last = await prisma.statusOption.findFirst({
             where: { scope: data.scope },
@@ -372,7 +419,7 @@ router.post('/statuses', requireAdmin, async (req, res, next) => {
                 isActive: data.isActive ?? true,
             },
         });
-        res.status(201).json({ status });
+        res.status(201).json({ status: optionFlags('statuses', status) });
     } catch (err) {
         if (err.code === 'P2002') {
             return next(
@@ -391,11 +438,23 @@ router.patch('/statuses/:id', requireAdmin, async (req, res, next) => {
         const data = statusUpdateSchema.parse(req.body);
         const updateData = { ...data };
         if (typeof data.label === 'string') updateData.label = data.label.trim();
+        if (data.isActive === false) {
+            const row = await prisma.statusOption.findUnique({
+                where: { id: req.params.id },
+                select: { scope: true },
+            });
+            if (row?.scope === 'TASK') {
+                throw httpError(
+                    400,
+                    'Task statuses can’t be hidden — every task uses them.',
+                );
+            }
+        }
         const status = await prisma.statusOption.update({
             where: { id: req.params.id },
             data: updateData,
         });
-        res.json({ status });
+        res.json({ status: optionFlags('statuses', status) });
     } catch (err) {
         if (err.code === 'P2025') return next(httpError(404, 'Status not found'));
         next(err);
@@ -404,6 +463,7 @@ router.patch('/statuses/:id', requireAdmin, async (req, res, next) => {
 
 router.delete('/statuses/:id', requireAdmin, async (req, res, next) => {
     try {
+        await assertDeletable('statuses', 'statusOption', req.params.id);
         await prisma.statusOption.delete({ where: { id: req.params.id } });
         res.json({ ok: true });
     } catch (err) {
@@ -432,7 +492,7 @@ router.post('/statuses/reorder', requireAdmin, async (req, res, next) => {
             where: { scope },
             orderBy: [{ order: 'asc' }, { label: 'asc' }],
         });
-        res.json({ statuses });
+        res.json({ statuses: statuses.map((st) => optionFlags('statuses', st)) });
     } catch (err) {
         next(err);
     }
@@ -458,7 +518,17 @@ const catalogReorderSchema = z.object({
 });
 
 function registerCatalog(path, model, label, options = {}) {
-    const { beforeDelete } = options;
+    // `extra`: optional per-catalogue fields — { schema: zod shape,
+    // toData(parsed) → columns, decorate(row) → row for responses }.
+    const { beforeDelete, extra } = options;
+    const createSchema = extra
+        ? catalogCreateSchema.extend(extra.schema)
+        : catalogCreateSchema;
+    const updateSchema = extra
+        ? catalogUpdateSchema.extend(extra.schema)
+        : catalogUpdateSchema;
+    const decorate = (row) => (extra?.decorate && row ? extra.decorate(row) : row);
+    const extraData = (data) => (extra?.toData ? extra.toData(data) : {});
     // GET — readable by any authenticated user so dropdowns work for
     // non-admins as well. `?includeInactive=1` lets the admin Templates
     // page also surface hidden rows.
@@ -472,7 +542,7 @@ function registerCatalog(path, model, label, options = {}) {
                 where,
                 orderBy: [{ order: 'asc' }, { name: 'asc' }],
             });
-            res.json({ [path]: items });
+            res.json({ [path]: items.map(decorate) });
         } catch (err) {
             next(err);
         }
@@ -480,7 +550,7 @@ function registerCatalog(path, model, label, options = {}) {
 
     router.post(`/${path}`, requireAdmin, async (req, res, next) => {
         try {
-            const data = catalogCreateSchema.parse(req.body);
+            const data = createSchema.parse(req.body);
             const last = await prisma[model].findFirst({
                 orderBy: { order: 'desc' },
                 select: { order: true },
@@ -491,9 +561,10 @@ function registerCatalog(path, model, label, options = {}) {
                     name: data.name.trim(),
                     order,
                     isActive: data.isActive ?? true,
+                    ...extraData(data),
                 },
             });
-            res.status(201).json({ item });
+            res.status(201).json({ item: decorate(item) });
         } catch (err) {
             if (err.code === 'P2002') {
                 return next(
@@ -506,8 +577,16 @@ function registerCatalog(path, model, label, options = {}) {
 
     router.patch(`/${path}/:id`, requireAdmin, async (req, res, next) => {
         try {
-            const data = catalogUpdateSchema.parse(req.body);
-            const updateData = { ...data };
+            const data = updateSchema.parse(req.body);
+            const updateData = {
+                name: data.name,
+                order: data.order,
+                isActive: data.isActive,
+                ...extraData(data),
+            };
+            for (const k of Object.keys(updateData)) {
+                if (updateData[k] === undefined) delete updateData[k];
+            }
             if (typeof data.name === 'string') {
                 updateData.name = data.name.trim();
             }
@@ -515,7 +594,7 @@ function registerCatalog(path, model, label, options = {}) {
                 where: { id: req.params.id },
                 data: updateData,
             });
-            res.json({ item });
+            res.json({ item: decorate(item) });
         } catch (err) {
             if (err.code === 'P2025')
                 return next(httpError(404, `${label} not found`));
@@ -562,7 +641,7 @@ function registerCatalog(path, model, label, options = {}) {
             const items = await prisma[model].findMany({
                 orderBy: [{ order: 'asc' }, { name: 'asc' }],
             });
-            res.json({ [path]: items });
+            res.json({ [path]: items.map(decorate) });
         } catch (err) {
             next(err);
         }
@@ -578,7 +657,28 @@ const projectTypeUpdateSchema = catalogUpdateSchema.extend({
     activityCode: z.string().max(60).optional().nullable(),
 });
 
-registerCatalog('countries', 'countryOption', 'country');
+// Countries carry an optional 3-letter code for project codes
+// (P26-USA-0001). Empty = automatic: the ISO 3166 alpha-3 code for the
+// name, which responses expose as `autoCode` so the admin sees what
+// will be used.
+registerCatalog('countries', 'countryOption', 'country', {
+    extra: {
+        schema: {
+            code: z
+                .string()
+                .trim()
+                .regex(/^[A-Za-z]{3}$/, 'Use exactly three letters (e.g. USA).')
+                .optional()
+                .nullable()
+                .or(z.literal('')),
+        },
+        toData: (data) =>
+            data.code === undefined
+                ? {}
+                : { code: data.code ? data.code.toUpperCase() : null },
+        decorate: (row) => ({ ...row, autoCode: countryTokenFromName(row.name) }),
+    },
+});
 registerCatalog('clients', 'clientOption', 'client', {
     // Projects store the client by name (denormalised string). Block
     // removing a client option while any project still references it.

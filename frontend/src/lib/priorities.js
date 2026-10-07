@@ -47,8 +47,12 @@ async function fetchScope(scope) {
     const promise = (async () => {
         try {
             const res = await api.get(`/templates/priorities?scope=${scope}`);
-            const list = res.data.priorities
-                .filter((p) => p.isActive)
+            // Task / project priority are fixed enums on the server: only
+            // the built-in keys can be saved, so never offer anything else
+            // (a stray custom row would be picked and then rejected).
+            const allowed = new Set(fallbackForScope(scope).map((p) => p.value));
+            const list = (res.data.priorities || [])
+                .filter((p) => p.isActive && allowed.has(p.key))
                 .sort((a, b) => a.order - b.order)
                 .map((p) => ({
                     value: p.key,

@@ -137,6 +137,44 @@ async function ensureDefaultTemplates() {
         });
         console.log(`[bootstrap] seeded ${defaults.length} status options`);
     }
+
+    // Closed scopes (lib/optionKeys): every built-in key needs a row so it
+    // can be styled under Templates. Task statuses never had rows — seed
+    // them visible. A built-in priority whose row was deleted earlier
+    // comes back HIDDEN (it was removed on purpose) so it can be managed
+    // again. Existing rows are never touched.
+    await ensureOptionRows('statusOption', 'statuses', 'TASK', { active: true });
+    await ensureOptionRows('priorityOption', 'priorities', 'PROJECT', { active: false });
+    await ensureOptionRows('priorityOption', 'priorities', 'TASK', { active: false });
+}
+
+async function ensureOptionRows(model, kind, scope, { active }) {
+    const { OPTION_DEFAULTS } = require('./optionKeys');
+    const defaults = OPTION_DEFAULTS[kind]?.[scope] || [];
+    if (!defaults.length) return;
+    const rows = await prisma[model].findMany({
+        where: { scope },
+        select: { key: true, order: true },
+    });
+    const have = new Set(rows.map((r) => r.key));
+    const missing = defaults.filter((d) => !have.has(d.key));
+    if (!missing.length) return;
+    let order = rows.reduce((m, r) => Math.max(m, r.order), -1) + 1;
+    await prisma[model].createMany({
+        data: missing.map((d) => ({
+            scope,
+            key: d.key,
+            label: d.label,
+            color: d.color,
+            order: order++,
+            // A brand-new scope (no rows yet) is always shown.
+            isActive: active || rows.length === 0,
+        })),
+        skipDuplicates: true,
+    });
+    console.log(
+        `[bootstrap] added ${missing.length} ${scope.toLowerCase()} ${kind} option(s): ${missing.map((d) => d.key).join(', ')}`,
+    );
 }
 
 // Stamps friendly codes (P25-USA-0001 / T-0001 / ST-0001) on any

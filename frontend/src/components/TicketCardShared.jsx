@@ -8,6 +8,7 @@ import {
     Inbox,
     Lock,
     Star,
+    Timer,
     UserCheck,
 } from 'lucide-react';
 
@@ -15,6 +16,7 @@ import { cn, initials, resolveAssetUrl } from '@/lib/utils';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { getTicketTypeIcon } from '@/lib/ticketTypeIcons';
 import { getTicketTypeBadgeClasses } from '@/lib/ticketTypeColors';
+import { fmtCountdownShort, fmtDateTimeLong } from '@/lib/ticketMeta';
 
 // One ticket card used EVERYWHERE — resolver and portal, board and grid —
 // so a ticket looks identical wherever it appears and every card is the
@@ -215,6 +217,18 @@ export default function TicketCardShared({
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                 <Clock className="h-3 w-3 shrink-0" />
                 <span className="truncate">{fmtDateTime(t.createdAt)}</span>
+                {t.status === 'RESOLVED' && t.autoCloseAt && (
+                    <span
+                        className="flex shrink-0 items-center gap-0.5 font-medium text-emerald-700 dark:text-emerald-300"
+                        title={`Closes automatically ${fmtDateTimeLong(t.autoCloseAt)}`}
+                        data-auto-close-chip=""
+                    >
+                        <Timer className="h-3 w-3" />
+                        {fmtCountdownShort(t.autoCloseAt) === 'soon'
+                            ? 'closes soon'
+                            : `closes in ${fmtCountdownShort(t.autoCloseAt)}`}
+                    </span>
+                )}
                 <span className="ml-auto flex shrink-0 items-center gap-1">
                     <span
                         className={cn(

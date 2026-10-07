@@ -18,7 +18,7 @@ import { toast } from 'sonner';
 import { Check, Copy, Link2, Loader2, Search, Send } from 'lucide-react';
 
 import { api } from '@/lib/api';
-import { cn, initials, resolveAssetUrl } from '@/lib/utils';
+import { cn, copyText, initials, resolveAssetUrl } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -92,12 +92,11 @@ export default function ShareDialog({ open, onOpenChange, item }) {
     }, [users, search, user?.id]);
 
     const copyLink = async () => {
-        try {
-            await navigator.clipboard.writeText(url);
+        if (await copyText(url)) {
             setCopied(true);
             toast.success('Link copied to clipboard.');
             setTimeout(() => setCopied(false), 1500);
-        } catch {
+        } else {
             toast.error('Could not copy — select and copy the link manually.');
         }
     };

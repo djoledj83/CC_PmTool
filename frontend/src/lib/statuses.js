@@ -56,15 +56,26 @@ async function fetchScope(scope) {
     const promise = (async () => {
         try {
             const res = await api.get(`/templates/statuses?scope=${scope}`);
-            const list = (res.data?.statuses || [])
-                .filter((s) => s.isActive)
-                .sort((a, b) => a.order - b.order)
-                .map((s) => ({
-                    value: s.key,
-                    label: s.label,
-                    color: s.color,
-                    badge: colorToBadge(s.color),
-                }));
+            const rows = (res.data?.statuses || []).slice().sort((a, b) => a.order - b.order);
+            const toOption = (s) => ({
+                value: s.key,
+                label: s.label,
+                color: s.color,
+                badge: colorToBadge(s.color),
+            });
+            let list;
+            if (scope === 'TASK') {
+                // Task status is a FIXED enum (TODO / IN_PROGRESS / ON_HOLD /
+                // DONE) the task API validates against. The admin rows only
+                // restyle and reorder those four — never hide them or add
+                // others — and any key without a row keeps its built-in look.
+                const fixed = TASK_STATUSES.map((t) => t.value);
+                const styled = rows.filter((r) => fixed.includes(r.key)).map(toOption);
+                const seen = new Set(styled.map((o) => o.value));
+                list = [...styled, ...TASK_STATUSES.filter((t) => !seen.has(t.value))];
+            } else {
+                list = rows.filter((r) => r.isActive).map(toOption);
+            }
             cache[scope] = list;
             notify();
             return list;
@@ -91,22 +102,11 @@ function fallbackMapForScope(scope) {
 }
 
 export function useStatuses(scope) {
-    // Task status is a FIXED enum (TODO / IN_PROGRESS / ON_HOLD / DONE) that
-    // the task API validates against — custom task statuses aren't supported.
-    // So for TASK we always use the built-in list and never fetch server
-    // rows, otherwise a stray StatusOption(scope=TASK) with an invalid key
-    // (e.g. "IN PROGRESS") would surface in the picker and get rejected on
-    // save. Only PROJECT statuses are truly customisable.
-    const isFixed = scope === 'TASK';
-    const [list, setList] = useState(() =>
-        isFixed ? fallbackForScope(scope) : cache[scope] || fallbackForScope(scope),
-    );
+    // Task statuses: the fixed four, styled by Templates → Statuses → Task
+    // (see fetchScope). Project statuses: fully admin-managed.
+    const [list, setList] = useState(() => cache[scope] || fallbackForScope(scope));
 
     useEffect(() => {
-        if (isFixed) {
-            setList(fallbackForScope(scope));
-            return undefined;
-        }
         let cancelled = false;
         const onChange = () => {
             if (cancelled) return;
@@ -122,7 +122,7 @@ export function useStatuses(scope) {
             cancelled = true;
             subscribers.delete(onChange);
         };
-    }, [scope, isFixed]);
+    }, [scope]);
 
     const find = (key) => {
         if (!key) return null;

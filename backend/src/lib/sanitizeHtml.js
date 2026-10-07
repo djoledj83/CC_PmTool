@@ -79,4 +79,52 @@ function sanitizeRichText(html) {
     return sanitizeHtmlLib(html, OPTIONS);
 }
 
-module.exports = { sanitizeRichText };
+// True when the string carries markup (vs a legacy plain-text value).
+function looksLikeHtml(s) {
+    return typeof s === 'string' && /<\/?[a-z][^>]*>/i.test(s);
+}
+
+// Readable plain text from stored rich text — for list previews, exports
+// and notification snippets. Plain text passes through unchanged.
+function htmlToPlainText(html) {
+    if (!html) return '';
+    const s = String(html);
+    if (!looksLikeHtml(s)) return s.trim();
+    return s
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<li[^>]*>/gi, '• ')
+        .replace(/<\/(p|div|li|h1|h2|h3|blockquote|pre)>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+// Normalises a submitted ticket description:
+//   - rich text (HTML) is sanitized; legacy plain text is kept as-is
+//     (the client renders it escaped, so it's inert either way)
+//   - an editor that's only empty paragraphs / <br> becomes null
+function cleanDescription(value) {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    if (!looksLikeHtml(raw)) return raw;
+    const clean = sanitizeRichText(raw);
+    const hasContent =
+        htmlToPlainText(clean).trim().length > 0 || /<img\b/i.test(clean);
+    return hasContent ? clean : null;
+}
+
+module.exports = {
+    sanitizeRichText,
+    looksLikeHtml,
+    htmlToPlainText,
+    cleanDescription,
+};

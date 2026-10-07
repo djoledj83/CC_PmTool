@@ -5,6 +5,7 @@ const prisma = require('../lib/prisma');
 const { requireAuth } = require('../middleware/auth');
 const { httpError } = require('../middleware/error');
 const { runDeadlineSweep } = require('../lib/deadlineAlerts');
+const { forPortal } = require('../lib/notify');
 
 const router = express.Router();
 
@@ -66,22 +67,42 @@ router.get('/', async (req, res, next) => {
             take: limit,
             include: notificationInclude,
         });
-        const unread = await prisma.notification.count({
-            where: { userId: req.user.id, read: false },
-        });
+        const [unread, unseen] = await Promise.all([
+            prisma.notification.count({
+                where: { userId: req.user.id, read: false },
+            }),
+            prisma.notification.count({
+                where: { userId: req.user.id, seenAt: null },
+            }),
+        ]);
 
-        res.json({ notifications: await attachTasks(notifications), unread });
+        // Portal (requester) accounts: no staff e-mails / project context.
+        const portal = req.user.role === 'REQUESTER';
+        res.json({
+            notifications: portal
+                ? notifications.map(forPortal)
+                : await attachTasks(notifications),
+            unread,
+            unseen,
+        });
     } catch (err) {
         next(err);
     }
 });
 
+// `unread` = not yet clicked (drives bold styling); `unseen` = never had the
+// bell dropdown opened since it arrived (drives the badge number).
 router.get('/unread-count', async (req, res, next) => {
     try {
-        const unread = await prisma.notification.count({
-            where: { userId: req.user.id, read: false },
-        });
-        res.json({ unread });
+        const [unread, unseen] = await Promise.all([
+            prisma.notification.count({
+                where: { userId: req.user.id, read: false },
+            }),
+            prisma.notification.count({
+                where: { userId: req.user.id, seenAt: null },
+            }),
+        ]);
+        res.json({ unread, unseen });
     } catch (err) {
         next(err);
     }
@@ -89,6 +110,20 @@ router.get('/unread-count', async (req, res, next) => {
 
 const idsSchema = z.object({
     ids: z.array(z.string().min(1)).optional(),
+});
+
+// Opening the bell: stamp everything as seen so the badge clears, without
+// touching `read` — items stay bold until the user actually opens them.
+router.post('/mark-seen', async (req, res, next) => {
+    try {
+        await prisma.notification.updateMany({
+            where: { userId: req.user.id, seenAt: null },
+            data: { seenAt: new Date() },
+        });
+        res.json({ ok: true, unseen: 0 });
+    } catch (err) {
+        next(err);
+    }
 });
 
 router.post('/mark-read', async (req, res, next) => {
@@ -101,12 +136,18 @@ router.post('/mark-read', async (req, res, next) => {
                 ...(ids && ids.length ? { id: { in: ids } } : {}),
                 read: false,
             },
-            data: { read: true, readAt: now },
+            // Reading implies seeing.
+            data: { read: true, readAt: now, seenAt: now },
         });
-        const unread = await prisma.notification.count({
-            where: { userId: req.user.id, read: false },
-        });
-        res.json({ ok: true, unread });
+        const [unread, unseen] = await Promise.all([
+            prisma.notification.count({
+                where: { userId: req.user.id, read: false },
+            }),
+            prisma.notification.count({
+                where: { userId: req.user.id, seenAt: null },
+            }),
+        ]);
+        res.json({ ok: true, unread, unseen });
     } catch (err) {
         next(err);
     }

@@ -73,7 +73,9 @@ const requesterGroupRoutes = require('./routes/requesterGroups');
 const terminalRoutes = require('./routes/terminals');
 const ticketFieldRoutes = require('./routes/ticketFields');
 const announcementRoutes = require('./routes/announcements');
+const adminLogRoutes = require('./routes/adminLogs');
 const { notFound, errorHandler } = require('./middleware/error');
+const { requestLogger, errorLogger, logger } = require('./lib/logger');
 const errorReporter = require('./lib/errorReporter');
 
 // Install process-level error sinks BEFORE anything else (route
@@ -97,6 +99,7 @@ const {
 } = require('./lib/bootstrap');
 const realtime = require('./lib/realtime');
 const { startAttachmentSweeper } = require('./lib/messageAttachments');
+const { startTicketAutoCloseSweeper } = require('./lib/ticketAutoClose');
 const { startDeadlineSweepScheduler } = require('./lib/deadlineAlerts');
 const { startSprintSnapshotScheduler } = require('./lib/sprintSnapshots');
 const { startSprintScheduleRunner } = require('./lib/sprintScheduler');
@@ -141,6 +144,12 @@ app.use(
 );
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
+
+// Access log — one metadata line per request (method/path/status/user/IP/
+// duration) to access-YYYY-MM-DD.log. Mounted early so it wraps everything;
+// it reads req.user at response-finish, so authenticated routes still get
+// the user id. Health/readiness probes are skipped inside the middleware.
+app.use(requestLogger);
 
 // Decide on the right Content-Disposition for project file attachments.
 // We want safe formats (PDF, images, plain text) to render INLINE so the
@@ -409,6 +418,7 @@ app.use('/api/requester-groups', requesterGroupRoutes);
 app.use('/api/terminals', terminalRoutes);
 app.use('/api/ticket-fields', ticketFieldRoutes);
 app.use('/api/announcements', announcementRoutes);
+app.use('/api/admin', adminLogRoutes);
 
 app.use(notFound);
 // Report 5xx errors to the reporter BEFORE the JSON-shape error
@@ -417,6 +427,9 @@ app.use(notFound);
 // DSN configured the reporter is a structured-logging upgrade; with
 // a DSN it ships to Sentry / GlitchTip.
 app.use(errorReporter.expressMiddleware());
+// Write errors (with stack) to error-YYYY-MM-DD.log, then hand off to the
+// JSON-shape handler which owns the response body.
+app.use(errorLogger);
 app.use(errorHandler);
 
 async function start() {
@@ -465,6 +478,15 @@ async function start() {
         startAttachmentSweeper();
     } catch (err) {
         console.error('[bootstrap] startAttachmentSweeper failed:', err);
+    }
+
+    // Resolved tickets set to "close automatically after N days" are
+    // closed by this sweep (~20s after boot, then every 5 minutes).
+    // See lib/ticketAutoClose.js.
+    try {
+        startTicketAutoCloseSweeper();
+    } catch (err) {
+        console.error('[bootstrap] startTicketAutoCloseSweeper failed:', err);
     }
 
     // Daily "task deadline approaching" sweep. Runs ~30s after boot
@@ -523,7 +545,9 @@ async function start() {
     }
 
     server.listen(PORT, () => {
-        console.log(`Backend running on port ${PORT} (HTTP + WebSocket)`);
+        logger.info(
+            `Backend running on port ${PORT} (HTTP + WebSocket) · logs: ${logger.dir || 'console only'}`,
+        );
     });
 }
 

@@ -129,7 +129,20 @@ const CAPABILITIES = {
     TICKET_CREATE: 'ticket:create',
     TICKET_MANAGE: 'ticket:manage',
     TICKET_VIEW_ALL: 'ticket:view:all',
+
+    // ── Observability / audit ──────────────────────────────────────
+    // View the server logs + sign-in audit trail. RESTRICTED: unlike
+    // every other capability, this is NOT covered by the ADMIN blanket
+    // (see ADMIN_EXCLUDED_CAPABILITIES below) — it must be granted to a
+    // user explicitly, even an admin. That carves a "super-admin" subset
+    // out of the Admin role so not every admin can read the logs.
+    LOGS_VIEW: 'logs:view',
 };
+
+// Capabilities the ADMIN role does NOT get for free. A holder must have
+// the flag explicitly in their per-user overrides. Keep this tiny — it's
+// only for genuinely sensitive, super-admin-level powers.
+const ADMIN_EXCLUDED_CAPABILITIES = new Set([CAPABILITIES.LOGS_VIEW]);
 
 // Default capability sets per role. ADMIN doesn't appear because we
 // short-circuit it inside `hasCapability` — admins always pass.
@@ -240,7 +253,11 @@ function requireAdminOrManagerRole(req) {
 // default set or an explicit per-user override. Admins always pass.
 function hasCapability(req, capability) {
     if (!req?.user) return false;
-    if (isAdmin(req)) return true;
+    // Admins pass everything EXCEPT the restricted (super-admin) set,
+    // which they must be granted explicitly like anyone else.
+    if (isAdmin(req) && !ADMIN_EXCLUDED_CAPABILITIES.has(capability)) {
+        return true;
+    }
     const fromRole =
         ROLE_DEFAULT_CAPABILITIES[req.user.role] || [];
     if (fromRole.includes(capability)) return true;
@@ -296,11 +313,18 @@ function isAdminOrManagerOrHasCapability(req, capability) {
 // the frontend to know which buttons to show.
 function effectiveCapabilities(user) {
     if (!user) return [];
-    if (user.role === 'ADMIN') return Object.values(CAPABILITIES);
-    const fromRole = ROLE_DEFAULT_CAPABILITIES[user.role] || [];
     const overrides = Array.isArray(user.capabilities)
         ? user.capabilities
         : [];
+    if (user.role === 'ADMIN') {
+        // Everything except the restricted set, plus any restricted caps
+        // this admin has been granted explicitly.
+        const base = Object.values(CAPABILITIES).filter(
+            (c) => !ADMIN_EXCLUDED_CAPABILITIES.has(c),
+        );
+        return Array.from(new Set([...base, ...overrides]));
+    }
+    const fromRole = ROLE_DEFAULT_CAPABILITIES[user.role] || [];
     return Array.from(new Set([...fromRole, ...overrides]));
 }
 

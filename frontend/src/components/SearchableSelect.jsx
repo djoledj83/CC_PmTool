@@ -1,6 +1,11 @@
 // A single-select dropdown with a type-to-filter search box. Use where a
 // plain <Select> gets unwieldy because the option list is long (e.g.
-// picking a project). `options` is [{ value, label }].
+// picking a project). `options` is [{ value, label }], plus optional:
+//   icon     — node rendered before the label
+//   badge    — small node rendered right-aligned (e.g. a "You" tag),
+//              also shown next to the selected value in the trigger
+//   keywords — extra text the search matches on (e.g. an assignee name
+//              shown only in the badge)
 import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronsUpDown, Search } from 'lucide-react';
 
@@ -31,7 +36,11 @@ export function SearchableSelect({
     const selected = options.find((o) => o.value === value) || null;
     const query = q.trim().toLowerCase();
     const filtered = query
-        ? options.filter((o) => (o.label || '').toLowerCase().includes(query))
+        ? options.filter((o) =>
+              `${o.label || ''} ${o.keywords || ''}`
+                  .toLowerCase()
+                  .includes(query),
+          )
         : options;
 
     // Reset the highlight to the top whenever the list changes or reopens.
@@ -92,6 +101,11 @@ export function SearchableSelect({
                         <span className="flex min-w-0 items-center gap-2">
                             {selected.icon}
                             <span className="truncate">{selected.label}</span>
+                            {selected.badge ? (
+                                <span className="shrink-0">
+                                    {selected.badge}
+                                </span>
+                            ) : null}
                         </span>
                     ) : (
                         <span className="truncate text-muted-foreground">
@@ -148,7 +162,14 @@ export function SearchableSelect({
                                     )}
                                 />
                                 {o.icon}
-                                <span className="truncate">{o.label}</span>
+                                <span className="min-w-0 flex-1 truncate">
+                                    {o.label}
+                                </span>
+                                {o.badge ? (
+                                    <span className="ml-auto shrink-0">
+                                        {o.badge}
+                                    </span>
+                                ) : null}
                             </button>
                         ))
                     )}

@@ -42,10 +42,11 @@ import {
     Download,
     ExternalLink,
     FolderKanban,
-    AppWindow,
     History,
+    Package,
     Loader2,
     Pencil,
+    PieChart,
     Plus,
     RefreshCw,
     Timer,
@@ -79,6 +80,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import {
     Select,
     SelectContent,
@@ -96,6 +98,8 @@ import {
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import TasksMultiSelect from '@/components/TasksMultiSelect';
+import ProjectsMultiSelect from '@/components/ProjectsMultiSelect';
+import DonutChart from '@/components/DonutChart';
 import { SearchableSelect } from '@/components/SearchableSelect';
 import { MultiSelectDropdown } from '@/components/MultiSelectDropdown';
 import { Tip } from '@/components/Tip';
@@ -120,6 +124,184 @@ function entryTaskId(entry) {
 function normalizeTaskPickerId(value) {
     if (!value || value === NO_TASK) return NO_TASK;
     return String(value);
+}
+
+// ---------------------------------------------------------------------
+// Task / project pickers: "what's mine" helpers
+// ---------------------------------------------------------------------
+
+// Remembered per browser: admins/managers who only ever log against
+// their own work flip this once and keep it.
+const ONLY_MINE_KEY = 'pm.time.onlyMine.v1';
+
+function readOnlyMine() {
+    try {
+        return localStorage.getItem(ONLY_MINE_KEY) === '1';
+    } catch {
+        return false;
+    }
+}
+
+function writeOnlyMine(on) {
+    try {
+        localStorage.setItem(ONLY_MINE_KEY, on ? '1' : '0');
+    } catch {
+        /* private mode / storage disabled — the toggle still works */
+    }
+}
+
+// Rows for a Task picker built from one project's task list.
+//   seeAll  — every task, nested (top-level task, then its subtasks)
+//   keepIds — tasks that must stay listed even when they aren't the
+//             caller's (the current selection, an entry's linked task)
+// Otherwise only tasks assigned to the caller are listed; a subtask
+// whose parent isn't listed reads "Parent → Subtask" so it still makes
+// sense on its own. Each row carries its assignee for the picker tag.
+function buildTaskPickerRows(tasks, { currentUserId, seeAll, keepIds = [] }) {
+    const keep = new Set(keepIds.filter(Boolean));
+    const isClosed = (t) => t?.status === 'DONE';
+    const row = (t, label) => ({
+        id: t.id,
+        label,
+        code: t.code,
+        closed: isClosed(t),
+        assigneeId: t.assigneeId || t.assignee?.id || null,
+        assigneeName: t.assignee?.name || null,
+    });
+    const tasksById = new Map(tasks.map((t) => [t.id, t]));
+    const childrenByParent = new Map();
+    for (const t of tasks) {
+        if (!t.parentTaskId) continue;
+        if (!childrenByParent.has(t.parentTaskId)) {
+            childrenByParent.set(t.parentTaskId, []);
+        }
+        childrenByParent.get(t.parentTaskId).push(t);
+    }
+
+    const out = [];
+    if (seeAll) {
+        for (const top of tasks.filter((t) => !t.parentTaskId)) {
+            out.push(row(top, top.title));
+            for (const c of childrenByParent.get(top.id) || []) {
+                out.push(row(c, `↳ ${c.title}`));
+            }
+        }
+        return out;
+    }
+
+    const listed = (t) => t.assigneeId === currentUserId || keep.has(t.id);
+    for (const t of tasks.filter(listed)) {
+        if (!t.parentTaskId) {
+            out.push(row(t, t.title));
+            for (const c of childrenByParent.get(t.id) || []) {
+                if (listed(c)) out.push(row(c, `↳ ${c.title}`));
+            }
+        } else {
+            const parent = tasksById.get(t.parentTaskId);
+            // Already emitted under its (listed) parent above.
+            if (parent && listed(parent)) continue;
+            out.push(row(t, `${parent?.title || 'Task'} → ${t.title}`));
+        }
+    }
+    return out;
+}
+
+// How the caller relates to a project, strongest first. `involvement`
+// comes from GET /projects; ownerId covers an older payload.
+function projectRelation(project, currentUserId) {
+    const inv = project?.involvement;
+    if (inv?.owner || (currentUserId && project?.ownerId === currentUserId)) {
+        return 'owner';
+    }
+    if ((inv?.assignedTasks || 0) > 0) return 'tasks';
+    if (inv?.participant) return 'member';
+    return null;
+}
+
+const PICKER_TAG_TONES = {
+    mine: 'bg-primary/15 text-primary',
+    tasks: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',
+    member: 'bg-muted text-muted-foreground',
+};
+
+function PickerTag({ tone, title, children }) {
+    return (
+        <span
+            title={title}
+            className={cn(
+                'inline-flex items-center whitespace-nowrap rounded px-1.5 text-[10px] font-medium leading-4',
+                PICKER_TAG_TONES[tone],
+            )}
+        >
+            {children}
+        </span>
+    );
+}
+
+// Project picker tag. "Member" is only worth showing when the list also
+// holds projects you're NOT part of (admins see every shared project);
+// for everyone else every listed project is one they belong to.
+function projectRelationBadge(project, currentUserId, { showMember }) {
+    const rel = projectRelation(project, currentUserId);
+    if (!rel || (rel === 'member' && !showMember)) return null;
+    const n = project?.involvement?.assignedTasks || 0;
+    const tasksNote =
+        n > 0 ? `${n} task${n === 1 ? '' : 's'} assigned to you` : '';
+    if (rel === 'owner') {
+        return (
+            <PickerTag
+                tone="mine"
+                title={['You own this project', tasksNote]
+                    .filter(Boolean)
+                    .join(' · ')}
+            >
+                Owner
+            </PickerTag>
+        );
+    }
+    if (rel === 'tasks') {
+        return (
+            <PickerTag tone="tasks" title={tasksNote}>
+                My tasks
+            </PickerTag>
+        );
+    }
+    return (
+        <PickerTag tone="member" title="You're a participant on this project">
+            Member
+        </PickerTag>
+    );
+}
+
+// "Marko Jovanović" → "Marko J." — enough to tell people apart in a
+// narrow picker; the full name is in the tooltip.
+function shortPersonName(name) {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length <= 1) return parts[0] || '';
+    return `${parts[0]} ${parts[parts.length - 1][0]}.`;
+}
+
+// Task picker tag: "You" on your own tasks — only when the list also
+// holds other people's, otherwise every row would say it — and the
+// assignee's short name on anyone else's. Unassigned: no tag.
+function taskAssigneeBadge(row, currentUserId, { showMine }) {
+    if (!row?.assigneeId) return null;
+    if (row.assigneeId === currentUserId) {
+        return showMine ? (
+            <PickerTag tone="mine" title="Assigned to you">
+                You
+            </PickerTag>
+        ) : null;
+    }
+    const full = row.assigneeName || 'someone else';
+    return (
+        <span
+            title={`Assigned to ${full}`}
+            className="inline-block whitespace-nowrap text-[10px] text-muted-foreground"
+        >
+            {shortPersonName(full) || 'Other'}
+        </span>
+    );
 }
 
 // 30-minute step duration options up to 8 hours, then a few coarser
@@ -552,6 +734,16 @@ function MineView() {
     const [loading, setLoading] = useState(false);
     const [editing, setEditing] = useState(null);
 
+    // "Only mine" (admins/managers only — everyone else already sees
+    // just their own tasks): hides projects you don't own, belong to or
+    // have tasks in, and tasks not assigned to you.
+    const [onlyMinePref, setOnlyMinePref] = useState(readOnlyMine);
+    const onlyMine = elevated && onlyMinePref;
+    const toggleOnlyMine = useCallback((on) => {
+        setOnlyMinePref(on);
+        writeOnlyMine(on);
+    }, []);
+
     // Quick-add form state.
     const [projectId, setProjectId] = useState('');
     const [taskId, setTaskId] = useState(NO_TASK);
@@ -643,88 +835,54 @@ function MineView() {
         };
     }, [projectId, tasksByProject]);
 
-    const taskOptions = useMemo(() => {
-        const tasks = tasksByProject[projectId] || [];
-        const project = projects.find((p) => p.id === projectId);
-        const isOwner =
-            project?.ownerId && project.ownerId === currentUser?.id;
-        const seeAll = elevated || isOwner;
-        // A finished task (DONE) is still selectable — you sometimes log
-        // time against something you just closed — but we flag it so the
-        // picker can show it dimmed with a "Done" tag.
-        const isClosed = (t) => t?.status === 'DONE';
+    // Elevated callers and the project's owner see every task; everyone
+    // else only tasks assigned to them. "Only mine" narrows the former
+    // down to the latter. A finished task (DONE) stays selectable — you
+    // sometimes log time against something you just closed — but is
+    // flagged so the picker shows a "Done" tag.
+    const selectedProject = useMemo(
+        () => projects.find((p) => p.id === projectId) || null,
+        [projects, projectId],
+    );
+    const seeAllTasks =
+        (elevated ||
+            Boolean(
+                selectedProject?.ownerId &&
+                    selectedProject.ownerId === currentUser?.id,
+            )) &&
+        !onlyMine;
+    const tasksLoaded = Boolean(projectId && tasksByProject[projectId]);
 
-        const tasksById = new Map(tasks.map((t) => [t.id, t]));
-        const childrenByParent = new Map();
-        for (const t of tasks) {
-            if (!t.parentTaskId) continue;
-            if (!childrenByParent.has(t.parentTaskId)) {
-                childrenByParent.set(t.parentTaskId, []);
-            }
-            childrenByParent.get(t.parentTaskId).push(t);
-        }
+    const taskOptions = useMemo(
+        () =>
+            buildTaskPickerRows(tasksByProject[projectId] || [], {
+                currentUserId: currentUser?.id,
+                seeAll: seeAllTasks,
+                // Keep a task you already picked visible after flipping
+                // "Only mine" on, so the selection never silently vanishes.
+                keepIds: taskId !== NO_TASK ? [taskId] : [],
+            }),
+        [projectId, tasksByProject, currentUser?.id, seeAllTasks, taskId],
+    );
 
+    // Project picker rows, tagged Owner / My tasks / Member. With "Only
+    // mine" on, projects you have nothing to do with are hidden (except
+    // the one already selected).
+    const projectOptions = useMemo(() => {
         const out = [];
-        if (seeAll) {
-            // Elevated callers see the original nested layout.
-            for (const top of tasks.filter((t) => !t.parentTaskId)) {
-                out.push({
-                    id: top.id,
-                    label: top.title,
-                    code: top.code,
-                    closed: isClosed(top),
-                });
-                for (const c of childrenByParent.get(top.id) || []) {
-                    out.push({
-                        id: c.id,
-                        label: `\u21B3 ${c.title}`,
-                        code: c.code,
-                        closed: isClosed(c),
-                    });
-                }
-            }
-            return out;
-        }
-
-        // Non-elevated: show only tasks assigned to the user. For an
-        // orphaned subtask (parent isn't theirs) inline the parent
-        // title so the row still reads as "Parent \u2192 Subtask" instead
-        // of a dangling arrow that means nothing.
-        const mine = tasks.filter((t) => t.assigneeId === currentUser?.id);
-        for (const t of mine) {
-            if (!t.parentTaskId) {
-                out.push({
-                    id: t.id,
-                    label: t.title,
-                    code: t.code,
-                    closed: isClosed(t),
-                });
-                for (const c of childrenByParent.get(t.id) || []) {
-                    if (c.assigneeId !== currentUser?.id) continue;
-                    out.push({
-                        id: c.id,
-                        label: `\u21B3 ${c.title}`,
-                        code: c.code,
-                        closed: isClosed(c),
-                    });
-                }
-            } else {
-                const parent = tasksById.get(t.parentTaskId);
-                if (parent && parent.assigneeId === currentUser?.id) {
-                    // Already emitted via the parent loop above — skip.
-                    continue;
-                }
-                const parentLabel = parent?.title || 'Task';
-                out.push({
-                    id: t.id,
-                    label: `${parentLabel} \u2192 ${t.title}`,
-                    code: t.code,
-                    closed: isClosed(t),
-                });
-            }
+        for (const p of projects) {
+            const mine = Boolean(projectRelation(p, currentUser?.id));
+            if (onlyMine && !mine && p.id !== projectId) continue;
+            out.push({
+                value: p.id,
+                label: (p.code ? `${p.code} · ` : '') + p.name,
+                badge: projectRelationBadge(p, currentUser?.id, {
+                    showMember: elevated,
+                }),
+            });
         }
         return out;
-    }, [projectId, tasksByProject, projects, currentUser?.id, elevated]);
+    }, [projects, currentUser?.id, onlyMine, projectId, elevated]);
 
     // -----------------------------------------------------------------
     // Totals: today / this week / this month, all from your own entries
@@ -1064,8 +1222,23 @@ function MineView() {
                 onSubmit={handleAdd}
                 className="rounded-lg border bg-card p-3 shadow-sm sm:p-4"
             >
-                <div className="mb-3 border-b pb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Log time
+                <div className="mb-3 flex items-center justify-between gap-3 border-b pb-2">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Log time
+                    </span>
+                    {elevated && (
+                        <label
+                            className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"
+                            title="Show only projects you own, belong to or have tasks in — and only tasks assigned to you"
+                        >
+                            <Switch
+                                checked={onlyMine}
+                                onCheckedChange={toggleOnlyMine}
+                                aria-label="Show only my projects and tasks"
+                            />
+                            <span>Only mine</span>
+                        </label>
+                    )}
                 </div>
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
                             <div className="space-y-1.5 lg:col-span-2">
@@ -1075,13 +1248,13 @@ function MineView() {
                                     onChange={setProjectId}
                                     placeholder="Pick a project"
                                     searchPlaceholder="Search projects…"
+                                    emptyText={
+                                        onlyMine
+                                            ? 'No matching projects of yours — switch off "Only mine" to see all'
+                                            : 'No matches'
+                                    }
                                     className="h-9"
-                                    options={projects.map((p) => ({
-                                        value: p.id,
-                                        label:
-                                            (p.code ? `${p.code} · ` : '') +
-                                            p.name,
-                                    }))}
+                                    options={projectOptions}
                                 />
                             </div>
                             <div className="space-y-1.5 lg:col-span-2">
@@ -1112,9 +1285,24 @@ function MineView() {
                                                     : '') +
                                                 opt.label +
                                                 (opt.closed ? ' · Done' : ''),
+                                            badge: taskAssigneeBadge(
+                                                opt,
+                                                currentUser?.id,
+                                                { showMine: seeAllTasks },
+                                            ),
+                                            keywords: opt.assigneeName || '',
                                         })),
                                     ]}
                                 />
+                                {onlyMine &&
+                                    tasksLoaded &&
+                                    taskOptions.length === 0 && (
+                                        <p className="text-[11px] text-muted-foreground">
+                                            No tasks assigned to you here —
+                                            log project-level time or switch
+                                            off “Only mine”.
+                                        </p>
+                                    )}
                             </div>
                             <div className="space-y-1.5">
                                 <Label className="text-xs">Date</Label>
@@ -2054,91 +2242,18 @@ function EditEntryDialog({
         project?.ownerId && project.ownerId === currentUser?.id;
 
     const taskOptions = useMemo(() => {
-        const tasks = tasksKnown || [];
         const entryLinkedId =
             entry?.taskId || entry?.task?.id
                 ? String(entry.taskId || entry.task.id)
                 : null;
-        const seeAll = elevated || isOwner;
-        const isClosed = (t) => t?.status === 'DONE';
-        const tasksById = new Map(tasks.map((t) => [t.id, t]));
-        const childrenByParent = new Map();
-        for (const t of tasks) {
-            if (!t.parentTaskId) continue;
-            if (!childrenByParent.has(t.parentTaskId)) {
-                childrenByParent.set(t.parentTaskId, []);
-            }
-            childrenByParent.get(t.parentTaskId).push(t);
-        }
-        const out = [];
-        if (seeAll) {
-            for (const top of tasks.filter((t) => !t.parentTaskId)) {
-                out.push({
-                    id: top.id,
-                    label: top.title,
-                    code: top.code,
-                    closed: isClosed(top),
-                });
-                for (const c of childrenByParent.get(top.id) || []) {
-                    out.push({
-                        id: c.id,
-                        label: `\u21B3 ${c.title}`,
-                        code: c.code,
-                        closed: isClosed(c),
-                    });
-                }
-            }
-        } else {
-        // Non-elevated: only show tasks assigned to the caller; if the
-        // entry is already pinned to a task they don't own (e.g. an
-        // admin reassigned it later), keep that one selectable so they
-        // don't get stuck unable to save a description change.
-        const mine = tasks.filter(
-            (t) =>
-                t.assigneeId === currentUser?.id ||
-                t.id === entryLinkedId,
-        );
-        for (const t of mine) {
-            if (!t.parentTaskId) {
-                out.push({
-                    id: t.id,
-                    label: t.title,
-                    code: t.code,
-                    closed: isClosed(t),
-                });
-                for (const c of childrenByParent.get(t.id) || []) {
-                    if (
-                        c.assigneeId !== currentUser?.id &&
-                        c.id !== entryLinkedId
-                    ) {
-                        continue;
-                    }
-                    out.push({
-                        id: c.id,
-                        label: `\u21B3 ${c.title}`,
-                        code: c.code,
-                        closed: isClosed(c),
-                    });
-                }
-            } else {
-                const parent = tasksById.get(t.parentTaskId);
-                if (
-                    parent &&
-                    (parent.assigneeId === currentUser?.id ||
-                        parent.id === entryLinkedId)
-                ) {
-                    continue;
-                }
-                const parentLabel = parent?.title || 'Task';
-                out.push({
-                    id: t.id,
-                    label: `${parentLabel} \u2192 ${t.title}`,
-                    code: t.code,
-                    closed: isClosed(t),
-                });
-            }
-        }
-        }
+        // Non-elevated: only your own tasks — plus the entry's current
+        // task if it isn't yours (e.g. an admin reassigned it later), so
+        // you never get stuck unable to save a description change.
+        const out = buildTaskPickerRows(tasksKnown || [], {
+            currentUserId: currentUser?.id,
+            seeAll: elevated || isOwner,
+            keepIds: [entryLinkedId],
+        });
         if (
             entryLinkedId &&
             !out.some((o) => o.id === entryLinkedId) &&
@@ -2266,6 +2381,15 @@ function EditEntryDialog({
                                                     Done
                                                 </span>
                                             )}
+                                            {taskAssigneeBadge(
+                                                opt,
+                                                currentUser?.id,
+                                                {
+                                                    showMine: Boolean(
+                                                        elevated || isOwner,
+                                                    ),
+                                                },
+                                            )}
                                         </span>
                                     </SelectItem>
                                 ))}
@@ -2348,6 +2472,21 @@ function EditEntryDialog({
 
 const ALL_OPTION = '__all__';
 
+// Hex palette for the pie/donut view of the breakdown charts. Mirrors the
+// set used on the Insights page so the two pages read consistently.
+const DONUT_PALETTE = [
+    '#0ea5e9',
+    '#10b981',
+    '#f59e0b',
+    '#8b5cf6',
+    '#f43f5e',
+    '#3b82f6',
+    '#f97316',
+    '#6366f1',
+    '#94a3b8',
+    '#e11d48',
+];
+
 function metaFilterParams(clientId, applicationId, isStrictAdmin) {
     if (!isStrictAdmin) return {};
     const out = {};
@@ -2381,6 +2520,32 @@ function useAdminClientApplicationCatalogs(enabled) {
         };
     }, [enabled]);
     return { clients, applications };
+}
+
+// Charts-only catalogue: the admin-managed Product list that replaces the
+// Application filter in ChartsView. Reads are open to any authenticated
+// user (see GET /templates/products); we only mount it for strict admins,
+// mirroring where the Application filter used to sit.
+function useProducts(enabled) {
+    const [products, setProducts] = useState([]);
+    useEffect(() => {
+        if (!enabled) {
+            setProducts([]);
+            return undefined;
+        }
+        let cancelled = false;
+        api.get('/templates/products')
+            .then(({ data }) => {
+                if (!cancelled) setProducts(data?.products || []);
+            })
+            .catch(() => {
+                if (!cancelled) setProducts([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [enabled]);
+    return products;
 }
 
 function AdminMetaFilterFields({
@@ -2425,6 +2590,55 @@ function AdminMetaFilterFields({
                         {applications.map((a) => (
                             <SelectItem key={a.id} value={a.id}>
                                 {a.name}
+                            </SelectItem>
+                        ))}
+                    </SelectContent>
+                </Select>
+            </div>
+        </>
+    );
+}
+
+// Charts-local meta filter: Client (unchanged) + Product. Product replaces
+// the Application filter in ChartsView only — AdminMetaFilterFields (Client
+// + Application) above is left intact for the All-users tab.
+function ChartsClientProductFields({
+    clients,
+    products,
+    clientId,
+    productId,
+    onClientChange,
+    onProductChange,
+}) {
+    return (
+        <>
+            <div className="space-y-1.5">
+                <Label className="text-xs">Client</Label>
+                <Select value={clientId} onValueChange={onClientChange}>
+                    <SelectTrigger>
+                        <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                        <SelectItem value={ALL_OPTION}>All clients</SelectItem>
+                        {clients.map((c) => (
+                            <SelectItem key={c.id} value={c.id}>
+                                {c.name}
+                            </SelectItem>
+                        ))}
+                    </SelectContent>
+                </Select>
+            </div>
+            <div className="space-y-1.5">
+                <Label className="text-xs">Product</Label>
+                <Select value={productId} onValueChange={onProductChange}>
+                    <SelectTrigger>
+                        <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                        <SelectItem value={ALL_OPTION}>All products</SelectItem>
+                        {products.map((p) => (
+                            <SelectItem key={p.id} value={p.id}>
+                                {p.name}
                             </SelectItem>
                         ))}
                     </SelectContent>
@@ -3653,13 +3867,13 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
     const [projects, setProjects] = useState([]);
     const [stats, setStats] = useState(null);
     const [loading, setLoading] = useState(false);
-    const { clients, applications } =
-        useAdminClientApplicationCatalogs(isStrictAdmin);
+    const { clients } = useAdminClientApplicationCatalogs(isStrictAdmin);
+    const products = useProducts(isStrictAdmin);
 
     const [userId, setUserId] = useState(ALL_OPTION);
-    const [projectId, setProjectId] = useState(ALL_OPTION);
+    const [projectIds, setProjectIds] = useState([]);
     const [clientId, setClientId] = useState(ALL_OPTION);
-    const [applicationId, setApplicationId] = useState(ALL_OPTION);
+    const [productId, setProductId] = useState(ALL_OPTION);
     const [taskIds, setTaskIds] = useState([]);
     // Default range = trailing 30 days. Stored as YYYY-MM-DD strings so
     // the inputs are simple to control.
@@ -3669,13 +3883,17 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
     const [from, setFrom] = useState(toDateInput(defaultFrom));
     const [to, setTo] = useState(toDateInput(today));
 
-    // Tasks dropdown options follow the selected project, same as the
-    // All-users tab. Switching project clears any active task picks.
+    // Tasks dropdown options follow the selected project when exactly one
+    // is picked (small, intuitive list); with zero or several projects we
+    // load the full task list. Changing the project selection clears any
+    // active task picks, same as the All-users tab.
+    const taskScopeProjectId =
+        projectIds.length === 1 ? projectIds[0] : ALL_OPTION;
     const { tasks: taskOptions, loading: taskOptionsLoading } =
-        useFilterableTasks(projectId, projects);
+        useFilterableTasks(taskScopeProjectId, projects);
 
-    const handleProjectChange = (next) => {
-        setProjectId(next);
+    const handleProjectsChange = (next) => {
+        setProjectIds(next);
         setTaskIds([]);
     };
 
@@ -3701,11 +3919,16 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
         try {
             const params = {};
             if (isAdmin && userId !== ALL_OPTION) params.userId = userId;
-            if (projectId !== ALL_OPTION) params.projectId = projectId;
-            Object.assign(
-                params,
-                metaFilterParams(clientId, applicationId, isStrictAdmin),
-            );
+            if (projectIds.length > 0) {
+                params.projectIds = projectIds.join(',');
+            }
+            // Charts-local meta filter: Client (kept) + Product (replaces
+            // Application). metaFilterParams / AdminMetaFilterFields are
+            // left untouched for the All-users tab.
+            if (isStrictAdmin) {
+                if (clientId !== ALL_OPTION) params.clientId = clientId;
+                if (productId !== ALL_OPTION) params.productId = productId;
+            }
             if (taskIds.length > 0) params.taskIds = taskIds.join(',');
             if (from) {
                 const d = new Date(from);
@@ -3729,9 +3952,9 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
         isAdmin,
         isStrictAdmin,
         userId,
-        projectId,
+        projectIds,
         clientId,
-        applicationId,
+        productId,
         taskIds,
         from,
         to,
@@ -3903,34 +4126,22 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                         </div>
                     )}
                     <div className="space-y-1.5">
-                        <Label className="text-xs">Project</Label>
-                        <Select
-                            value={projectId}
-                            onValueChange={handleProjectChange}
-                        >
-                            <SelectTrigger>
-                                <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                                <SelectItem value={ALL_OPTION}>
-                                    All projects
-                                </SelectItem>
-                                {projects.map((p) => (
-                                    <SelectItem key={p.id} value={p.id}>
-                                        {p.name}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
+                        <Label className="text-xs">Projects</Label>
+                        <ProjectsMultiSelect
+                            projects={projects}
+                            value={projectIds}
+                            onChange={handleProjectsChange}
+                            width={300}
+                        />
                     </div>
                     {isStrictAdmin && (
-                        <AdminMetaFilterFields
+                        <ChartsClientProductFields
                             clients={clients}
-                            applications={applications}
+                            products={products}
                             clientId={clientId}
-                            applicationId={applicationId}
+                            productId={productId}
                             onClientChange={setClientId}
-                            onApplicationChange={setApplicationId}
+                            onProductChange={setProductId}
                         />
                     )}
                     <div className="space-y-1.5">
@@ -3941,7 +4152,7 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                             onChange={setTaskIds}
                             loading={taskOptionsLoading}
                             placeholder={
-                                projectId === ALL_OPTION
+                                taskScopeProjectId === ALL_OPTION
                                     ? 'All tasks (any project)'
                                     : 'All tasks'
                             }
@@ -4090,7 +4301,7 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                 </button>
             </div>
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <ChartCard
+                <TogglableBreakdownCard
                     title={stackByUser ? 'Hours by user' : 'Hours by project'}
                     subtitle={
                         stackByUser
@@ -4104,6 +4315,11 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                             : !stats?.byProject?.length
                     }
                     emptyText="No time entries in this range yet."
+                    donutRows={
+                        stackByUser
+                            ? breakdownDonutRows(stats?.byUser, 'userId')
+                            : breakdownDonutRows(stats?.byProject, 'projectId', stats?.byProjectOther)
+                    }
                 >
                     <ContributorBars
                         rows={
@@ -4129,9 +4345,9 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                         }
                         kind={stackByUser ? 'user' : 'project'}
                     />
-                </ChartCard>
+                </TogglableBreakdownCard>
 
-                <ChartCard
+                <TogglableBreakdownCard
                     title="Top projects"
                     subtitle={
                         stats?.byProject?.length
@@ -4141,6 +4357,7 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                     loading={loading}
                     empty={!stats?.byProject?.length}
                     emptyText="No project activity in this range."
+                    donutRows={breakdownDonutRows(stats?.byProject, 'projectId', stats?.byProjectOther)}
                 >
                     <HorizontalBars
                         data={(stats?.byProject || []).map((p) => ({
@@ -4151,15 +4368,16 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                         }))}
                         accent="bg-primary"
                     />
-                </ChartCard>
+                </TogglableBreakdownCard>
 
-                <ChartCard
+                <TogglableBreakdownCard
                     title="By project type"
                     subtitle="Categorisation set in Templates"
                     loading={loading}
                     empty={!stats?.byType?.length}
                     emptyText="No project activity in this range."
                     icon={FolderKanban}
+                    donutRows={breakdownDonutRows(stats?.byType, 'projectTypeId')}
                 >
                     <HorizontalBars
                         data={(stats?.byType || []).map((t) => ({
@@ -4168,9 +4386,10 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                             seconds: t.seconds,
                         }))}
                         showPercent
+                        total={total}
                         accent="bg-emerald-500"
                     />
-                </ChartCard>
+                </TogglableBreakdownCard>
 
                 <ChartCard
                     title="Hours by weekday"
@@ -4187,13 +4406,14 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                     <HorizontalBars
                         data={byWeekday}
                         showPercent
+                        total={total}
                         accent="bg-amber-500"
                     />
                 </ChartCard>
 
                 {isStrictAdmin && (
                     <>
-                        <ChartCard
+                        <TogglableBreakdownCard
                             title="Hours by client"
                             subtitle={
                                 stats?.byClient?.length
@@ -4204,6 +4424,7 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                             empty={!stats?.byClient?.length}
                             emptyText="No client-linked time in this range."
                             icon={Building2}
+                            donutRows={breakdownDonutRows(stats?.byClient, 'clientId', stats?.byClientOther)}
                         >
                             <HorizontalBars
                                 data={(stats?.byClient || []).map((c) => ({
@@ -4212,37 +4433,40 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                                     seconds: c.seconds,
                                 }))}
                                 showPercent
+                                total={total}
                                 accent="bg-orange-500"
                             />
-                        </ChartCard>
+                        </TogglableBreakdownCard>
 
-                        <ChartCard
-                            title="Hours by application"
+                        <TogglableBreakdownCard
+                            title="Hours by product"
                             subtitle={
-                                stats?.byApplication?.length
-                                    ? `${stats.byApplication.length} application${stats.byApplication.length === 1 ? '' : 's'}`
+                                stats?.byProduct?.length
+                                    ? `${stats.byProduct.length} product${stats.byProduct.length === 1 ? '' : 's'}`
                                     : ''
                             }
                             loading={loading}
-                            empty={!stats?.byApplication?.length}
-                            emptyText="No application-linked time in this range."
-                            icon={AppWindow}
+                            empty={!stats?.byProduct?.length}
+                            emptyText="No product-linked time in this range."
+                            icon={Package}
+                            donutRows={breakdownDonutRows(stats?.byProduct, 'productId', stats?.byProductOther)}
                         >
                             <HorizontalBars
-                                data={(stats?.byApplication || []).map((a) => ({
-                                    key: a.applicationId || a.name,
-                                    label: a.name,
-                                    seconds: a.seconds,
+                                data={(stats?.byProduct || []).map((p) => ({
+                                    key: p.productId || p.name,
+                                    label: p.name,
+                                    seconds: p.seconds,
                                 }))}
                                 showPercent
+                                total={total}
                                 accent="bg-violet-500"
                             />
-                        </ChartCard>
+                        </TogglableBreakdownCard>
                     </>
                 )}
 
                 {isAdmin && (
-                    <ChartCard
+                    <TogglableBreakdownCard
                         title="Top users"
                         subtitle={
                             stats?.byUser?.length
@@ -4253,6 +4477,7 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                         empty={!stats?.byUser?.length}
                         emptyText="No contributors in this range."
                         icon={UsersIcon}
+                        donutRows={breakdownDonutRows(stats?.byUser, 'userId')}
                     >
                         <HorizontalBars
                             data={(stats?.byUser || []).map((u, i) => ({
@@ -4266,7 +4491,7 @@ function ChartsView({ isAdmin, isStrictAdmin = false }) {
                             }))}
                             accent="bg-sky-500"
                         />
-                    </ChartCard>
+                    </TogglableBreakdownCard>
                 )}
             </div>
         </ChartCollapseContext.Provider>
@@ -4288,6 +4513,7 @@ function ChartCard({
     loading,
     empty,
     emptyText,
+    headerRight,
     children,
 }) {
     const { signal, value } = useContext(ChartCollapseContext);
@@ -4329,6 +4555,14 @@ function ChartCard({
                     {loading && (
                         <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                     )}
+                    {headerRight && (
+                        <span
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex items-center"
+                        >
+                            {headerRight}
+                        </span>
+                    )}
                 </div>
             </header>
             {open && (
@@ -4343,6 +4577,109 @@ function ChartCard({
                 </div>
             )}
         </section>
+    );
+}
+
+// Map a breakdown array ({ <idKey>, name, seconds }) to DonutChart rows.
+// Colours cycle through DONUT_PALETTE so a pie reads consistently with the
+// Insights page. `count` carries seconds; the card formats it as duration.
+function breakdownDonutRows(rows, idKey, otherItems) {
+    const out = (rows || []).map((r, i) => ({
+        key: r[idKey] ?? r.name ?? String(i),
+        label: r.name,
+        count: r.seconds || 0,
+        color: DONUT_PALETTE[i % DONUT_PALETTE.length],
+    }));
+    // The backend sends the items beyond the top-N as `otherItems`. Roll
+    // them into one "Other (N)" slice that carries the individual items, so
+    // the donut legend can expand to reveal them. This also makes the ring
+    // fill to 100% and every slice's share reflect the TRUE grand total.
+    // Uncapped breakdowns pass nothing and get no "Other" slice.
+    const tail = otherItems || [];
+    const otherSeconds = tail.reduce((s, r) => s + (r.seconds || 0), 0);
+    if (tail.length > 0 && otherSeconds > 0) {
+        out.push({
+            key: '__other__',
+            label: `Other (${tail.length})`,
+            count: otherSeconds,
+            color: '#cbd5e1',
+            items: tail.map((r) => ({ label: r.name, seconds: r.seconds })),
+        });
+    }
+    return out;
+}
+
+// A breakdown ChartCard with a bar/pie toggle in its header (mirrors the
+// Insights page's TogglableBreakdown). "bar" renders the existing bar
+// component passed as children; "pie" renders a shared DonutChart of the
+// same category totals. Only for BREAKDOWN charts — never the time-series
+// ones (by day / by weekday), where a pie of dates is meaningless.
+function TogglableBreakdownCard({
+    title,
+    subtitle,
+    icon,
+    loading,
+    empty,
+    emptyText,
+    donutRows,
+    centerLabel = 'Total',
+    children,
+}) {
+    const [view, setView] = useState('bar');
+    const toggle = (
+        <div className="flex rounded-md border p-0.5">
+            <button
+                type="button"
+                onClick={() => setView('bar')}
+                className={cn(
+                    'flex h-6 w-6 items-center justify-center rounded transition-colors',
+                    view === 'bar'
+                        ? 'bg-accent text-foreground'
+                        : 'text-muted-foreground hover:text-foreground',
+                )}
+                title="Bar chart"
+                aria-label="Bar chart"
+            >
+                <BarChart3 className="h-3.5 w-3.5" />
+            </button>
+            <button
+                type="button"
+                onClick={() => setView('pie')}
+                className={cn(
+                    'flex h-6 w-6 items-center justify-center rounded transition-colors',
+                    view === 'pie'
+                        ? 'bg-accent text-foreground'
+                        : 'text-muted-foreground hover:text-foreground',
+                )}
+                title="Pie chart"
+                aria-label="Pie chart"
+            >
+                <PieChart className="h-3.5 w-3.5" />
+            </button>
+        </div>
+    );
+    return (
+        <ChartCard
+            title={title}
+            subtitle={subtitle}
+            icon={icon}
+            loading={loading}
+            empty={empty}
+            emptyText={emptyText}
+            headerRight={toggle}
+        >
+            {view === 'bar' ? (
+                children
+            ) : (
+                <div className="flex flex-1 items-center justify-center">
+                    <DonutChart
+                        rows={donutRows}
+                        centerLabel={centerLabel}
+                        formatValue={(v) => formatDuration(v)}
+                    />
+                </div>
+            )}
+        </ChartCard>
     );
 }
 
@@ -5063,9 +5400,13 @@ function formatHourTick(hours) {
 // When `row.colorHex` is provided the bar uses that exact colour
 // (matches the colour the same key gets in the stacked Daily Hours
 // chart so admins can scan across both at a glance).
-function HorizontalBars({ data, accent = 'bg-primary', showPercent }) {
+function HorizontalBars({ data, accent = 'bg-primary', showPercent, total: totalOverride }) {
     const max = Math.max(1, ...data.map((d) => d.seconds));
-    const total = data.reduce((s, d) => s + d.seconds, 0) || 1;
+    // `total` is the denominator for the % share. Defaults to the sum of the
+    // shown rows, but callers pass the grand total for truncated (top-N)
+    // lists so each row shows its true share of ALL time, not just of what's
+    // displayed. Bar WIDTHS still scale to `max` (largest visible bar).
+    const total = totalOverride || data.reduce((s, d) => s + d.seconds, 0) || 1;
     return (
         <ul className="flex flex-1 flex-col gap-2">
             {data.map((row) => {

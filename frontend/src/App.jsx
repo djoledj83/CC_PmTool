@@ -6,6 +6,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { useAuth } from '@/contexts/AuthContext';
 import Portal from '@/pages/Portal';
 import PortalRequest from '@/pages/PortalRequest';
+import PortalHelp from '@/pages/PortalHelp';
 import Login from '@/pages/Login';
 import Register from '@/pages/Register';
 import ForgotPassword from '@/pages/ForgotPassword';
@@ -26,6 +27,7 @@ import Billing from '@/pages/Billing';
 import Templates from '@/pages/Templates';
 import TimeLoggingSettings from '@/pages/TimeLoggingSettings';
 import Announcements from '@/pages/Announcements';
+import AdminLogs from '@/pages/AdminLogs';
 import Teams from '@/pages/Teams';
 import Requests from '@/pages/Requests';
 import TimeTracking from '@/pages/TimeTracking';
@@ -203,6 +205,16 @@ export default function App() {
                     }
                 />
                 <Route
+                    path="/logs"
+                    element={
+                        <ProtectedRoute
+                            strictCapability={CAPABILITIES.LOGS_VIEW}
+                        >
+                            <AdminLogs />
+                        </ProtectedRoute>
+                    }
+                />
+                <Route
                     path="/teams"
                     element={
                         <ProtectedRoute
@@ -246,6 +258,7 @@ export default function App() {
                     path="/portal/requests/:id"
                     element={<PortalRequest />}
                 />
+                <Route path="/portal/help" element={<PortalHelp />} />
             </Route>
         </Routes>
     );

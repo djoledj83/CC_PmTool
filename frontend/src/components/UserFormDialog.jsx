@@ -17,6 +17,7 @@ import { cn, initials, resolveAssetUrl } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import {
     CAPABILITY_GROUPS,
+    ADMIN_EXCLUDED_CAPABILITIES,
     ROLE_LABELS,
     roleDefaults,
 } from '@/lib/capabilities';
@@ -159,7 +160,13 @@ export function UserFormDialog({
 
     const submit = (values) => {
         const isExternalReq = role === 'REQUESTER' && external;
-        if (isAdmin && isExternalReq && clientId === 'none') {
+        // A pending sign-up gets its organisation when it's approved.
+        if (
+            isAdmin &&
+            isExternalReq &&
+            clientId === 'none' &&
+            initialValues?.status !== 'PENDING'
+        ) {
             toast.error('Pick an organization for an external requester.');
             return;
         }
@@ -675,11 +682,62 @@ function CapabilityEditor({
             return next;
         });
     if (role === 'ADMIN') {
+        // Admins get every STANDARD capability from their role, so those
+        // toggles are hidden. The exception is the restricted set
+        // (super-admin powers like logs:view) which even admins must be
+        // granted explicitly — those still render as real checkboxes.
+        const restricted = CAPABILITY_GROUPS.flatMap((g) => g.items).filter(
+            (i) => ADMIN_EXCLUDED_CAPABILITIES.includes(i.key),
+        );
         return (
-            <div className="rounded-md border bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">
-                <Info className="-mt-0.5 mr-1 inline h-3.5 w-3.5" />
-                Admins always have every capability. Per-user overrides
-                only apply to non-admin roles.
+            <div className="space-y-3">
+                <div className="rounded-md border bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">
+                    <Info className="-mt-0.5 mr-1 inline h-3.5 w-3.5" />
+                    Admins already have every standard capability. The powers
+                    below are the exception — grant them explicitly.
+                </div>
+                {restricted.length > 0 && (
+                    <ul className="space-y-1.5 rounded-md border bg-muted/30 p-3">
+                        {restricted.map((item) => {
+                            const checked = capabilities.includes(item.key);
+                            return (
+                                <li
+                                    key={item.key}
+                                    className="flex items-start gap-2 rounded px-1 py-1"
+                                >
+                                    <input
+                                        id={`cap-${item.key}`}
+                                        type="checkbox"
+                                        className="mt-0.5 h-4 w-4 cursor-pointer accent-primary"
+                                        checked={checked}
+                                        onChange={() => onToggle(item.key)}
+                                    />
+                                    <label
+                                        htmlFor={`cap-${item.key}`}
+                                        className="flex-1 cursor-pointer select-none text-xs"
+                                    >
+                                        <div className="flex flex-wrap items-center gap-1">
+                                            <span className="font-medium text-foreground">
+                                                {item.label}
+                                            </span>
+                                            {item.risk === 'danger' && (
+                                                <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-destructive">
+                                                    <ShieldAlert className="h-2.5 w-2.5" />
+                                                    Restricted
+                                                </span>
+                                            )}
+                                        </div>
+                                        {item.hint && (
+                                            <p className="mt-0.5 text-muted-foreground">
+                                                {item.hint}
+                                            </p>
+                                        )}
+                                    </label>
+                                </li>
+                            );
+                        })}
+                    </ul>
+                )}
             </div>
         );
     }

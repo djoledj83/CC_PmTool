@@ -9,6 +9,9 @@
 //
 // Read access: anyone who can open or manage tickets (so the portal can
 // render the cards). Write access: admin only — this is workspace config.
+//
+// Each type also carries the help panel shown next to its raise form
+// (tips, related resources, on-call contact) — see lib/ticketHelp.js.
 
 const express = require('express');
 const { z } = require('zod');
@@ -22,6 +25,11 @@ const {
     hasCapability,
     CAPABILITIES,
 } = require('../lib/permissions');
+const {
+    helpFieldsSchema,
+    helpData,
+    serializeHelp,
+} = require('../lib/ticketHelp');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -41,6 +49,9 @@ const createSchema = z.object({
     // Agents allowed to see this type's tickets. Empty/omitted =
     // unrestricted (every agent sees the open queue).
     agentIds: z.array(z.string()).optional(),
+    // Help panel: tips, resourcesIntro, resources, oncallText,
+    // oncallLabel, oncallContact.
+    ...helpFieldsSchema,
 });
 
 const patchSchema = createSchema.partial();
@@ -73,6 +84,8 @@ function serialize(t, { includeAgents = false } = {}) {
             ? { id: t.project.id, name: t.project.name, code: t.project.code }
             : null,
         defaultPriority: t.defaultPriority || null,
+        // Requesters need this too — the raise form shows it.
+        help: serializeHelp(t),
         active: t.active,
         position: t.position,
     };
@@ -128,17 +141,26 @@ router.get('/', async (req, res, next) => {
             where.id = { in: allowed.map((a) => a.requestTypeId) };
         }
         const admin = isAdmin(req);
+        // Portal accounts never see the project behind a type.
+        const portal = req.user.role === 'REQUESTER';
         const rows = await prisma.ticketRequestType.findMany({
             where,
             include: admin
                 ? AGENT_INCLUDE
-                : { project: { select: { id: true, name: true, code: true } } },
+                : portal
+                  ? undefined
+                  : { project: { select: { id: true, name: true, code: true } } },
             orderBy: [{ position: 'asc' }, { name: 'asc' }],
         });
         res.json({
-            requestTypes: rows.map((r) =>
-                serialize(r, { includeAgents: admin }),
-            ),
+            requestTypes: rows.map((r) => {
+                const out = serialize(r, { includeAgents: admin });
+                if (portal) {
+                    out.projectId = null;
+                    out.project = null;
+                }
+                return out;
+            }),
         });
     } catch (err) {
         next(err);
@@ -165,6 +187,8 @@ router.post('/', async (req, res, next) => {
                 color: data.color || null,
                 projectId: data.projectId || null,
                 defaultPriority: data.defaultPriority || null,
+                // Help panel (tips not sent → the built-in tips).
+                ...helpData(data),
                 active: data.active ?? true,
                 position: data.position ?? 0,
                 createdById: req.user.id,
@@ -209,6 +233,8 @@ router.patch('/:id', async (req, res, next) => {
         ]) {
             if (data[k] !== undefined) update[k] = data[k];
         }
+        // Help panel fields that were sent (omitted = unchanged).
+        Object.assign(update, helpData(data));
         // Replace the allowed-agent set when the caller sends agentIds.
         if (data.agentIds !== undefined) {
             const agentIds = await validAgentIds(data.agentIds);

@@ -19,10 +19,17 @@ import {
 } from 'lucide-react';
 
 import { api } from '@/lib/api';
-import { cn, flashDeepLinkTarget, initials, resolveAssetUrl } from '@/lib/utils';
+import {
+    cn,
+    copyText,
+    flashDeepLinkTarget,
+    initials,
+    resolveAssetUrl,
+} from '@/lib/utils';
 import { TopBar } from '@/components/TopBar';
 import { Pagination, usePagination } from '@/components/Pagination';
 import { UserFormDialog } from '@/components/UserFormDialog';
+import { ApproveUserDialog } from '@/components/ApproveUserDialog';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import AvatarLightbox from '@/components/AvatarLightbox';
 import { Badge } from '@/components/ui/badge';
@@ -184,6 +191,8 @@ function UsersAdmin() {
     const [pendingAvatar, setPendingAvatar] = useState(null);
     const [resetUrl, setResetUrl] = useState(null);
     const [query, setQuery] = useState('');
+    // Pending sign-up being approved (the account-type dialog).
+    const [approving, setApproving] = useState(null);
 
     const statusFilter = searchParams.get('status') || 'all';
     const roleFilter = searchParams.get('role') || 'all';
@@ -294,6 +303,11 @@ function UsersAdmin() {
     };
 
     const handleApprove = async (user) => {
+        // A sign-up: choose the account type first (customer by default).
+        if (user.status === 'PENDING') {
+            setApproving(user);
+            return;
+        }
         try {
             const { data } = await api.post(`/users/${user.id}/approve`);
             const verb = user.status === 'PENDING' ? 'approved' : 'reactivated';
@@ -711,6 +725,15 @@ function UsersAdmin() {
                                                         ? 'App moderator'
                                                         : u.role || 'USER'}
                                                 </Badge>
+                                                {/* Requesters: customer org vs employee. */}
+                                                {u.role === 'REQUESTER' && (
+                                                    <div className="mt-0.5 max-w-[10rem] truncate text-[10px] text-muted-foreground">
+                                                        {u.external
+                                                            ? u.client?.name ||
+                                                              'Customer · no organisation'
+                                                            : 'Internal (employee)'}
+                                                    </div>
+                                                )}
                                             </TableCell>
                                             <TableCell className="text-muted-foreground">
                                                 {u.phone || '—'}
@@ -867,6 +890,18 @@ function UsersAdmin() {
                 </div>
             </main>
 
+            <ApproveUserDialog
+                open={Boolean(approving)}
+                onOpenChange={(o) => !o && setApproving(null)}
+                user={approving}
+                onApproved={(fresh) => {
+                    setUsers((prev) =>
+                        prev.map((u) => (u.id === fresh.id ? fresh : u)),
+                    );
+                    refreshCounts();
+                }}
+            />
+
             <UserFormDialog
                 open={dialogOpen}
                 onOpenChange={setDialogOpen}
@@ -891,9 +926,12 @@ function UsersAdmin() {
                     <DialogFooter>
                         <Button
                             variant="outline"
-                            onClick={() => {
-                                navigator.clipboard?.writeText(resetUrl || '');
-                                toast.success('Copied to clipboard');
+                            onClick={async () => {
+                                if (await copyText(resetUrl || '')) {
+                                    toast.success('Copied to clipboard');
+                                } else {
+                                    toast.error('Could not copy — select the link and copy it manually.');
+                                }
                             }}
                         >
                             Copy link

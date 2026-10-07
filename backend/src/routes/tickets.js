@@ -39,14 +39,34 @@ const {
     ticketsWithUnreadActivity,
 } = require('../lib/notify');
 const { logActivityEvent } = require('../lib/activityLog');
+const { notifyStatusChange } = require('../lib/ticketStatusNotify');
 const {
     ticketFileUpload,
     fileUrl,
     withSignedUrl,
     removeFileSafe,
 } = require('../lib/upload');
-const realtime = require('../lib/realtime');
-const { sanitizeRichText } = require('../lib/sanitizeHtml');
+const {
+    canManageTickets,
+    canViewAllTickets,
+    ticketScopeWhere,
+    requesterCanSee,
+    participantCandidateWhere,
+    staffMayAddToTicket,
+    portalTicketLink,
+    agentTicketLink,
+    ticketLinkFor,
+    emitTicketEvent,
+} = require('../lib/ticketAccess');
+const {
+    MAX_AUTO_CLOSE_DAYS,
+    autoCloseFields,
+} = require('../lib/ticketAutoClose');
+const {
+    sanitizeRichText,
+    htmlToPlainText,
+    cleanDescription,
+} = require('../lib/sanitizeHtml');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -67,7 +87,7 @@ const TicketType = z.enum(['INCIDENT', 'REQUEST', 'QUESTION', 'PROBLEM']);
 
 const createSchema = z.object({
     subject: z.string().trim().min(1).max(200),
-    description: z.string().trim().max(10000).optional().nullable(),
+    description: z.string().trim().max(20000).optional().nullable(),
     // Requesters DON'T pick a project — a resolver assigns it later, so
     // projectId is optional. Agents may still pass one when opening.
     projectId: z.string().min(1).optional().nullable(),
@@ -94,7 +114,7 @@ const patchSchema = z.object({
     // subject/description are editable by the reporter (until taken) and
     // by agents; the rest are agent-only.
     subject: z.string().trim().min(1).max(200).optional(),
-    description: z.string().trim().max(10000).optional().nullable(),
+    description: z.string().trim().max(20000).optional().nullable(),
     status: TicketStatus.optional(),
     priority: TicketPriority.optional(),
     type: TicketType.optional(),
@@ -102,6 +122,14 @@ const patchSchema = z.object({
     projectId: z.string().min(1).optional(),
     // null clears the assignee; a string sets it.
     assigneeId: z.string().min(1).optional().nullable(),
+    // Resolved only: close automatically N days from now (null = don't).
+    autoCloseDays: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_AUTO_CLOSE_DAYS)
+        .optional()
+        .nullable(),
 });
 
 const messageSchema = z.object({
@@ -123,11 +151,17 @@ const logTimeSchema = z
         path: ['endedAt'],
     });
 
-// Capability helpers ---------------------------------------------------
-const canManage = (req) =>
-    isAdminOrHasCapability(req, CAPABILITIES.TICKET_MANAGE);
-const canViewAll = (req) =>
-    isAdmin(req) || hasCapability(req, CAPABILITIES.TICKET_VIEW_ALL);
+// Capability helpers (shared with lib/ticketAccess) ---------------------
+const canManage = canManageTickets;
+const canViewAll = canViewAllTickets;
+
+// Timeline events a requester may see (status-type only).
+const REQUESTER_EVENT_KINDS = new Set([
+    'CREATED',
+    'STATUS_CHANGED',
+    'REOPENED',
+    'AUTO_CLOSED',
+]);
 
 const TICKET_INCLUDE = {
     project: { select: { id: true, name: true, code: true } },
@@ -173,7 +207,7 @@ async function logTicketEvent(ticketId, actorId, kind, fromValue, toValue) {
 
 // Resolve a set of user ids from explicit participant ids + requester
 // group ids. Only active users are kept. Returns a deduped array.
-async function resolveParticipantUserIds(participantIds, groupIds) {
+async function resolveParticipantUserIds(participantIds, groupIds, candidateWhere = { status: 'ACTIVE' }) {
     const ids = new Set((participantIds || []).filter(Boolean));
     if (groupIds && groupIds.length) {
         const members = await prisma.requesterGroupMember.findMany({
@@ -184,7 +218,7 @@ async function resolveParticipantUserIds(participantIds, groupIds) {
     }
     if (ids.size === 0) return [];
     const users = await prisma.user.findMany({
-        where: { id: { in: Array.from(ids) }, status: 'ACTIVE' },
+        where: { id: { in: Array.from(ids) }, ...candidateWhere },
         select: { id: true },
     });
     return users.map((u) => u.id);
@@ -199,17 +233,31 @@ async function ticketParticipantIds(ticketId) {
     return rows.map((r) => r.userId);
 }
 
-// Notification deep-links differ by role: the requester lands on their
-// portal request, everyone else (agents / watchers) on the workspace.
-const portalTicketLink = (id) => `/portal/requests/${id}`;
-const agentTicketLink = (id) => `/tickets?ticket=${id}`;
+// Notification deep-links differ by role (lib/ticketAccess): requesters
+// land on their portal request, everyone else on the workspace.
+
+// Users split into staff / requesters, so each gets the right link — and
+// requester-side people can be left out where they must not be told.
+async function splitByRole(userIds) {
+    const ids = Array.from(new Set((userIds || []).filter(Boolean)));
+    if (!ids.length) return { staff: [], requesters: [] };
+    const rows = await prisma.user.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, role: true, external: true, clientId: true },
+    });
+    return {
+        staff: rows.filter((u) => u.role !== 'REQUESTER').map((u) => u.id),
+        requesters: rows.filter((u) => u.role === 'REQUESTER'),
+    };
+}
 
 // First non-empty line of the ticket's own description, trimmed for a
 // list preview. NOT the request type's blurb — the actual content the
 // requester typed.
 function descriptionPreview(desc) {
     if (!desc) return null;
-    const line = desc
+    // Descriptions may be rich text now — preview the readable text.
+    const line = htmlToPlainText(desc)
         .split('\n')
         .map((l) => l.trim())
         .find(Boolean);
@@ -242,11 +290,38 @@ function forList(t) {
         terminalModel: t.terminalModel ?? null,
         fieldValues: Array.isArray(t.fieldValues) ? t.fieldValues : [],
         descriptionPreview: descriptionPreview(t.description),
+        // Resolved tickets set to close by themselves (see ticketAutoClose).
+        autoCloseAt: t.autoCloseAt ?? null,
+        autoCloseDays: t.autoCloseDays ?? null,
         messageCount: t._count?.messages ?? undefined,
         createdAt: t.createdAt,
         updatedAt: t.updatedAt,
     };
 }
+
+// What requesters get of a ticket row: no project and nobody else's
+// e-mail address (only names + pictures).
+const personLite = (u) =>
+    u ? { id: u.id, name: u.name, avatarUrl: u.avatarUrl || null } : u;
+function forRequester(t, viewerId = null) {
+    const out = forList(t);
+    out.project = null;
+    if (out.assignee) out.assignee = personLite(out.assignee);
+    if (out.reporter && out.reporter.id !== viewerId) {
+        out.reporter = personLite(out.reporter);
+    }
+    return out;
+}
+// Message counts for ticket cards — requesters never count internal notes.
+const messageCountFor = (req) => ({
+    select: {
+        messages: canManage(req)
+            ? true
+            : { where: { direction: { not: 'INTERNAL' } } },
+    },
+});
+const serializeFor = (req, t) =>
+    canManage(req) ? forList(t) : forRequester(t, req.user.id);
 
 // Build the WHERE that scopes which tickets a caller may list/read.
 //   - view-all (admin) -> everything
@@ -256,62 +331,16 @@ function forList(t) {
 //                         agent disappears unless you're invited.
 //   - otherwise        -> only their own (reporter)
 async function scopeWhere(req) {
-    if (canViewAll(req)) return {};
-    const me = req.user.id;
-    if (canManage(req)) {
-        return {
-            OR: [
-                { assigneeId: me },
-                { reporterId: me },
-                { participants: { some: { userId: me } } },
-                // Restricted types are a private team queue: an allowed
-                // agent sees ALL of that type's tickets (even taken ones).
-                // Internal tickets stay private to their selected people.
-                {
-                    internal: false,
-                    requestType: { agents: { some: { userId: me } } },
-                },
-                // Open (unassigned) tickets on an UNRESTRICTED type — no
-                // request type, or a type with no allowed-agent list.
-                { internal: false, assigneeId: null, requestTypeId: null },
-                {
-                    internal: false,
-                    assigneeId: null,
-                    requestType: { is: { agents: { none: {} } } },
-                },
-            ],
-        };
-    }
-    // External requesters are scoped to their organisation: they see only
-    // non-internal tickets they reported, ones tagged to their client
-    // (organisation), or ones they were explicitly invited to.
-    if (req.user.external) {
-        return {
-            internal: false,
-            OR: [
-                { reporterId: me },
-                ...(req.user.clientId
-                    ? [{ clientId: req.user.clientId }]
-                    : []),
-                { participants: { some: { userId: me } } },
-            ],
-        };
-    }
-    // Internal requesters (our employees) get the shared queue: every
-    // non-internal ticket, plus internal ones they reported or are on.
-    return {
-        OR: [
-            { internal: false },
-            { reporterId: me },
-            { participants: { some: { userId: me } } },
-        ],
-    };
+    return ticketScopeWhere(req);
 }
 
 // GET /api/tickets ------------------------------------------------------
 router.get('/', async (req, res, next) => {
     try {
-        const where = await scopeWhere(req);
+        // The caller's visibility scope stays in its own AND clause, so no
+        // filter below (internal=…, status=…, search) can widen it.
+        let scope = await scopeWhere(req);
+        const where = {};
         const {
             status,
             projectId,
@@ -354,13 +383,27 @@ router.get('/', async (req, res, next) => {
             where.internal = false;
         if (projectId) {
             const pid = String(projectId);
-            // Project "Tickets" tab: anyone who can read the project sees
-            // EVERY ticket on it, not just the ones personally scoped to
-            // them. Drop the personal OR-scope in that case.
-            const canSeeProjectTickets =
-                canViewAll(req) ||
-                (await accessibleProjectIds(req)).includes(pid);
-            if (canSeeProjectTickets) delete where.OR;
+            // Project "Tickets" tab: agents who can read the project also
+            // see its tickets taken by others — but internal tickets and
+            // private-queue types stay with their own people.
+            if (
+                !canViewAll(req) &&
+                canManage(req) &&
+                (await accessibleProjectIds(req)).includes(pid)
+            ) {
+                scope = {
+                    OR: [
+                        scope,
+                        {
+                            internal: false,
+                            OR: [
+                                { requestTypeId: null },
+                                { requestType: { is: { agents: { none: {} } } } },
+                            ],
+                        },
+                    ],
+                };
+            }
             where.projectId = pid;
         }
         if (assigneeId === 'me') where.assigneeId = req.user.id;
@@ -393,9 +436,10 @@ router.get('/', async (req, res, next) => {
                 },
             ];
         }
+        where.AND = [scope, ...(where.AND || [])];
         const tickets = await prisma.ticket.findMany({
             where,
-            include: { ...TICKET_INCLUDE, _count: { select: { messages: true } } },
+            include: { ...TICKET_INCLUDE, _count: messageCountFor(req) },
             // Latest activity first — updatedAt is bumped on every new
             // message and on status/assignment changes, so tickets that
             // just had action float to the top.
@@ -420,7 +464,7 @@ router.get('/', async (req, res, next) => {
         const pinnedSet = new Set(pinRows.map((p) => p.refId));
         res.json({
             tickets: tickets.map((t) => ({
-                ...forList(t),
+                ...serializeFor(req, t),
                 unread: unreadSet.has(t.id),
                 pinned: pinnedSet.has(t.id),
             })),
@@ -437,6 +481,11 @@ router.post('/', async (req, res, next) => {
             throw httpError(403, 'You cannot open tickets.');
         }
         const data = createSchema.parse(req.body);
+        // Portal accounts always raise a request type — that's what limits
+        // which kinds of tickets they (or their organisation) may open.
+        if (req.user.role === 'REQUESTER' && !data.requestTypeId) {
+            throw httpError(400, 'Pick a request type.');
+        }
 
         // The requester picks the project. The request type (if any) is
         // just a classification now — we only read its default priority,
@@ -497,12 +546,20 @@ router.post('/', async (req, res, next) => {
         // Project is optional now. If one was passed (an agent opening a
         // ticket, say) verify it exists; requesters leave it null and a
         // resolver assigns it later.
+        // Only agents file a ticket under a project; requesters never pick
+        // one (a resolver assigns it).
+        if (!canManage(req)) data.projectId = null;
         if (data.projectId) {
             const project = await prisma.project.findUnique({
                 where: { id: data.projectId },
                 select: { id: true },
             });
             if (!project) throw httpError(400, 'Selected project not found.');
+        }
+        // External requesters always file under their own organisation —
+        // never another client's.
+        if (!canManage(req) && req.user.external) {
+            data.clientId = req.user.clientId || null;
         }
 
         // Resolve + validate the admin-defined custom fields (global +
@@ -539,7 +596,9 @@ router.post('/', async (req, res, next) => {
         // required Client field is satisfied by that even if not sent.
         const effectiveClientId = canManage(req)
             ? data.clientId || null
-            : req.user.clientId || data.clientId || null;
+            : req.user.external
+              ? req.user.clientId || null
+              : req.user.clientId || data.clientId || null;
         const missing = [];
         const cleanValues = [];
         for (const d of fieldDefs) {
@@ -587,7 +646,7 @@ router.post('/', async (req, res, next) => {
             data: {
                 code,
                 subject: data.subject,
-                description: data.description || null,
+                description: cleanDescription(data.description) ?? null,
                 projectId: data.projectId || null,
                 requestTypeId: requestType ? requestType.id : null,
                 // Requesters' tickets are auto-tagged to their own
@@ -607,17 +666,21 @@ router.post('/', async (req, res, next) => {
                 status: 'NEW',
                 source: 'IN_APP',
             },
-            include: { ...TICKET_INCLUDE, _count: { select: { messages: true } } },
+            include: { ...TICKET_INCLUDE, _count: messageCountFor(req) },
         });
         await logTicketEvent(ticket.id, req.user.id, 'CREATED', null, null);
 
         // Co-requesters chosen at open time (individuals + groups) become
         // participants. The reporter is dropped (they're already on it).
+        let coIds = [];
         try {
-            const coIds = (
+            // Requesters may only add people they're allowed to pick
+            // (external ones: colleagues of their own organisation).
+            coIds = (
                 await resolveParticipantUserIds(
                     data.participantIds,
                     data.groupIds,
+                    participantCandidateWhere(req, ticket),
                 )
             ).filter((uid) => uid !== req.user.id);
             if (coIds.length) {
@@ -657,7 +720,11 @@ router.post('/', async (req, res, next) => {
                 (a) => a.userId,
             );
             let recipientIds;
-            if (allowedAgentIds.length > 0) {
+            if (ticket.internal) {
+                // A private (internal) ticket: only the staff picked for it
+                // hear about it — not the whole agent pool.
+                recipientIds = (await splitByRole(coIds)).staff;
+            } else if (allowedAgentIds.length > 0) {
                 recipientIds = allowedAgentIds;
             } else {
                 const agents = await prisma.user.findMany({
@@ -684,7 +751,8 @@ router.post('/', async (req, res, next) => {
             /* non-fatal */
         }
 
-        res.status(201).json({ ticket: forList(ticket) });
+        await emitTicketEvent(ticket.id, 'ticket:activity', { ticketId: ticket.id });
+        res.status(201).json({ ticket: serializeFor(req, ticket) });
     } catch (err) {
         next(err);
     }
@@ -697,12 +765,9 @@ router.post('/', async (req, res, next) => {
 // Declared before /:id so "projects" isn't read as a ticket id.
 router.get('/projects', async (req, res, next) => {
     try {
-        if (
-            !isAdminOrHasCapability(req, CAPABILITIES.TICKET_CREATE) &&
-            !canManage(req)
-        ) {
-            throw httpError(403, 'Not allowed.');
-        }
+        // Agents only: requesters never pick a project, and the project
+        // list is internal information.
+        if (!canManage(req)) throw httpError(403, 'Not allowed.');
         const projects = await prisma.project.findMany({
             select: { id: true, name: true, code: true },
             orderBy: { name: 'asc' },
@@ -794,8 +859,14 @@ router.get('/stats', async (req, res, next) => {
                 mineOpen += 1;
             }
         }
+        // Requesters' figures are limited to the tickets they may see.
+        const requesterScope = agent ? null : await scopeWhere(req);
         const unassignedQueue = await prisma.ticket.count({
-            where: { assigneeId: null, status: { notIn: ['RESOLVED', 'CLOSED'] } },
+            where: {
+                assigneeId: null,
+                status: { notIn: ['RESOLVED', 'CLOSED'] },
+                ...(requesterScope ? { AND: [requesterScope] } : {}),
+            },
         });
         const payload = {
             mine: {
@@ -818,6 +889,7 @@ router.get('/stats', async (req, res, next) => {
                 where: {
                     ...(createdWindow ? { createdAt: createdWindow } : {}),
                     ...teamWhere,
+                    ...(requesterScope ? { AND: [requesterScope] } : {}),
                 },
                 select: {
                     id: true,
@@ -980,6 +1052,24 @@ router.get('/stats', async (req, res, next) => {
                 .filter((r) => r.status === 'PENDING')
                 .slice(0, 12);
 
+            // Requesters get counts only — no projects, agents, other
+            // clients or ticket subjects.
+            if (requesterScope) {
+                payload.workspace = {
+                    total: all.length,
+                    open,
+                    resolved,
+                    unassigned,
+                    byStatus,
+                    byPriority,
+                    byCategory,
+                    avgResolutionSeconds: resCount
+                        ? Math.round(resSum / resCount)
+                        : null,
+                    trend,
+                };
+                return res.json(payload);
+            }
             payload.workspace = {
                 total: all.length,
                 open,
@@ -1043,46 +1133,51 @@ async function loadVisibleTicket(req, id) {
     if (!ticket) throw httpError(404, 'Ticket not found.');
     if (canViewAll(req)) return ticket;
     const me = req.user.id;
+    // Requester side (lib/ticketAccess.requesterCanSee): customers only ever
+    // open non-internal tickets of their own organisation (or organisation-
+    // less ones they're on) — whatever old share / participant rows say.
+    if (!canManage(req)) {
+        const visible = requesterCanSee(req.user, {
+            internal: ticket.internal,
+            clientId: ticket.clientId,
+            reporterId: ticket.reporterId,
+            participantIds: (ticket.participants || []).map((p) => p.userId),
+            shareIds: (ticket.shares || []).map((s) => s.userId),
+        });
+        if (!visible) throw httpError(404, 'Ticket not found.');
+        return ticket;
+    }
     if (ticket.reporterId === me) return ticket;
     const isParticipant = (ticket.participants || []).some(
         (p) => p.userId === me,
     );
-    // A ticket explicitly shared with me is viewable regardless of role,
-    // internal flag, or organisation — that's the whole point of sharing.
+    // A ticket explicitly shared with me is viewable regardless of the
+    // internal flag — that's the whole point of sharing.
     const isSharedWithMe = (ticket.shares || []).some((s) => s.userId === me);
     if (isSharedWithMe) return ticket;
-    if (canManage(req)) {
-        if (ticket.assigneeId === me) return ticket;
-        if (isParticipant) return ticket;
-        // Internal tickets are private to their reporter / assignee /
-        // selected participants — no open-queue or team-queue access.
-        if (!ticket.internal) {
-            // Restricted type → only allowed agents (team queue). Otherwise
-            // (no type / no allowed list) the open queue is visible to all.
-            const allowed = (ticket.requestType?.agents || []).map(
-                (a) => a.userId,
-            );
-            if (allowed.length > 0) {
-                if (allowed.includes(me)) return ticket;
-            } else if (!ticket.assigneeId) {
-                return ticket;
-            }
-        }
-        throw httpError(404, 'Ticket not found.');
-    }
-    // Requesters never see internal (private) tickets unless invited.
-    if (ticket.internal && !isParticipant) {
-        throw httpError(404, 'Ticket not found.');
-    }
-    // External requesters are further limited to their own organisation.
-    if (req.user.external) {
-        const sameOrg =
-            req.user.clientId && ticket.clientId === req.user.clientId;
-        if (!sameOrg && !isParticipant) {
-            throw httpError(404, 'Ticket not found.');
+    if (ticket.assigneeId === me) return ticket;
+    if (isParticipant) return ticket;
+    // Internal tickets are private to their reporter / assignee /
+    // selected participants — no open-queue or team-queue access.
+    if (!ticket.internal) {
+        // Restricted type → only allowed agents (team queue). Otherwise
+        // (no type / no allowed list) the open queue is visible to all.
+        const allowed = (ticket.requestType?.agents || []).map(
+            (a) => a.userId,
+        );
+        if (allowed.length > 0) {
+            if (allowed.includes(me)) return ticket;
+        } else if (!ticket.assigneeId) {
+            return ticket;
+        } else if (
+            ticket.projectId &&
+            (await accessibleProjectIds(req)).includes(ticket.projectId)
+        ) {
+            // Same rule as the project's Tickets tab.
+            return ticket;
         }
     }
-    return ticket;
+    throw httpError(404, 'Ticket not found.');
 }
 
 // GET /api/tickets/:id --------------------------------------------------
@@ -1151,21 +1246,32 @@ router.get('/:id', async (req, res, next) => {
             where: { ticketId: ticket.id },
             select: { userId: true, lastReadAt: true },
         });
-        realtime.emitToAll('ticket:read', {
+        await emitTicketEvent(ticket, 'ticket:read', {
             ticketId: ticket.id,
             userId: req.user.id,
             lastReadAt: now,
         });
+        const agentView = canManage(req);
+        // Requesters never get files attached to internal notes, the
+        // agent-side events, the project or linked internal tasks.
+        const internalIds = new Set(
+            messages.filter((m) => m.direction === 'INTERNAL').map((m) => m.id),
+        );
+        const visibleAttachments = agentView
+            ? attachments
+            : attachments.filter((a) => !a.messageId || !internalIds.has(a.messageId));
         res.json({
             ticket: {
-                ...forList(ticket),
+                ...serializeFor(req, ticket),
                 description: ticket.description,
-                linkedTasks: ticket.tasks || [],
+                linkedTasks: agentView ? ticket.tasks || [] : [],
             },
             messages: visibleMessages,
-            events,
+            events: agentView
+                ? events
+                : events.filter((e) => REQUESTER_EVENT_KINDS.has(e.kind)),
             participants: participants.map((p) => p.user),
-            attachments: attachments.map((a) => withSignedUrl(a, req.user.id)),
+            attachments: visibleAttachments.map((a) => withSignedUrl(a, req.user.id)),
             reads,
         });
     } catch (err) {
@@ -1206,7 +1312,7 @@ router.patch('/:id', async (req, res, next) => {
             }
             if (data.subject !== undefined) update.subject = data.subject;
             if (data.description !== undefined)
-                update.description = data.description;
+                update.description = cleanDescription(data.description);
         }
 
         // priority — reporter any time, or agent.
@@ -1240,6 +1346,22 @@ router.patch('/:id', async (req, res, next) => {
                             'Assign a project before taking the ticket.',
                         );
                     }
+                    // Only active staff can handle a ticket — never a
+                    // portal (requester) account.
+                    const assignee = await prisma.user.findUnique({
+                        where: { id: data.assigneeId },
+                        select: { status: true, role: true },
+                    });
+                    if (
+                        !assignee ||
+                        assignee.status !== 'ACTIVE' ||
+                        assignee.role === 'REQUESTER'
+                    ) {
+                        throw httpError(
+                            400,
+                            'Tickets can only be assigned to active staff members.',
+                        );
+                    }
                 }
                 update.assigneeId = data.assigneeId;
                 events.push([
@@ -1261,10 +1383,23 @@ router.patch('/:id', async (req, res, next) => {
                     ticket.status === 'CLOSED' ? 'REOPENED' : 'STATUS_CHANGED';
                 events.push([kind, ticket.status, data.status]);
             }
+            // Auto-close lives only while the ticket is Resolved. Resolving
+            // (or changing the timer of a resolved ticket) starts it from
+            // now — no days = no auto-close; any other status clears it.
+            const nextStatus = update.status ?? ticket.status;
+            if (nextStatus === 'RESOLVED') {
+                if (update.status === 'RESOLVED' || data.autoCloseDays !== undefined) {
+                    Object.assign(update, autoCloseFields(data.autoCloseDays));
+                }
+            } else if (update.status !== undefined) {
+                update.autoCloseAt = null;
+                update.autoCloseDays = null;
+            }
         } else if (
             data.status !== undefined ||
             data.assigneeId !== undefined ||
-            data.type !== undefined
+            data.type !== undefined ||
+            data.autoCloseDays !== undefined
         ) {
             throw httpError(403, 'Only agents can change status or assignee.');
         }
@@ -1272,7 +1407,7 @@ router.patch('/:id', async (req, res, next) => {
         const updated = await prisma.ticket.update({
             where: { id: ticket.id },
             data: update,
-            include: { ...TICKET_INCLUDE, _count: { select: { messages: true } } },
+            include: { ...TICKET_INCLUDE, _count: messageCountFor(req) },
         });
         for (const [kind, from, to] of events) {
             await logTicketEvent(ticket.id, req.user.id, kind, from, to);
@@ -1315,6 +1450,12 @@ router.patch('/:id', async (req, res, next) => {
         // give the newly assigned agent a heads-up. Best-effort.
         if (events.some(([k]) => k === 'ASSIGNED') && updated.assigneeId) {
             try {
+                const reporterRow = updated.reporterId
+                    ? await prisma.user.findUnique({
+                          where: { id: updated.reporterId },
+                          select: { id: true, role: true },
+                      })
+                    : null;
                 await notify({
                     recipientIds: [updated.reporterId],
                     actorId: req.user.id,
@@ -1322,7 +1463,9 @@ router.patch('/:id', async (req, res, next) => {
                     title: `${updated.code}: your request is being handled`,
                     body: `${updated.assignee?.name || 'An agent'} is now handling your request.`,
                     projectId: updated.projectId,
-                    link: portalTicketLink(updated.id),
+                    link: reporterRow
+                        ? ticketLinkFor(reporterRow, updated.id)
+                        : portalTicketLink(updated.id),
                     meta: { ticketId: updated.id },
                 });
                 await notify({
@@ -1339,8 +1482,21 @@ router.patch('/:id', async (req, res, next) => {
                 /* non-fatal */
             }
         }
-        realtime.emitToAll('ticket:activity', { ticketId: updated.id });
-        res.json({ ticket: forList(updated) });
+        // Status news for the requester side (Pending / Resolved — with
+        // the auto-close timer — / Closed / reopened).
+        const statusEvent = events.find(
+            ([k]) => k === 'STATUS_CHANGED' || k === 'REOPENED',
+        );
+        if (statusEvent) {
+            await notifyStatusChange(updated, {
+                from: statusEvent[1],
+                to: statusEvent[2],
+                actorId: req.user.id,
+                autoCloseDays: updated.autoCloseDays ?? null,
+            });
+        }
+        await emitTicketEvent(ticket, 'ticket:activity', { ticketId: updated.id });
+        res.json({ ticket: serializeFor(req, updated) });
     } catch (err) {
         next(err);
     }
@@ -1369,7 +1525,7 @@ router.post('/:id/take', async (req, res, next) => {
         const updated = await prisma.ticket.update({
             where: { id: ticket.id },
             data,
-            include: { ...TICKET_INCLUDE, _count: { select: { messages: true } } },
+            include: { ...TICKET_INCLUDE, _count: messageCountFor(req) },
         });
         await logTicketEvent(
             ticket.id,
@@ -1425,8 +1581,8 @@ router.post('/:id/take', async (req, res, next) => {
         } catch {
             /* non-fatal */
         }
-        realtime.emitToAll('ticket:activity', { ticketId: updated.id });
-        res.json({ ticket: forList(updated) });
+        await emitTicketEvent(ticket, 'ticket:activity', { ticketId: updated.id });
+        res.json({ ticket: serializeFor(req, updated) });
     } catch (err) {
         next(err);
     }
@@ -1465,7 +1621,7 @@ router.delete('/:id', async (req, res, next) => {
                 ticketCategory: ticket.type,
             },
         });
-        realtime.emitToAll('ticket:activity', { ticketId: ticket.id });
+        await emitTicketEvent(ticket, 'ticket:activity', { ticketId: ticket.id });
         res.json({ ok: true });
     } catch (err) {
         next(err);
@@ -1525,7 +1681,7 @@ router.post('/:id/restore', async (req, res, next) => {
                 ticketCategory: ghost.type,
             },
         });
-        realtime.emitToAll('ticket:activity', { ticketId: ghost.id });
+        await emitTicketEvent(ghost.id, 'ticket:activity', { ticketId: ghost.id });
         res.json({ ok: true });
     } catch (err) {
         next(err);
@@ -1571,11 +1727,19 @@ router.post('/:id/attachments', uploadTicketFile, async (req, res, next) => {
         if (messageId) {
             const msg = await prisma.ticketMessage.findUnique({
                 where: { id: messageId },
-                select: { id: true, ticketId: true },
+                select: { id: true, ticketId: true, authorId: true, direction: true },
             });
             if (!msg || msg.ticketId !== ticket.id) {
                 removeFileSafe(fileUrl(req.file.filename));
                 throw httpError(400, 'Message does not belong to this ticket.');
+            }
+            // Requesters only add files to their own (public) messages.
+            if (
+                !canManage(req) &&
+                (msg.authorId !== req.user.id || msg.direction === 'INTERNAL')
+            ) {
+                removeFileSafe(fileUrl(req.file.filename));
+                throw httpError(403, 'You can only attach files to your own messages.');
             }
         }
         // Images are pasted/attached photos — keep them for ~2 months then
@@ -1650,9 +1814,17 @@ router.post('/:id/participants', async (req, res, next) => {
         const targetIds = await resolveParticipantUserIds(
             [...single, ...many],
             groupIds,
+            participantCandidateWhere(req, ticket),
         );
         if (targetIds.length === 0) {
-            throw httpError(400, 'No valid users to add.');
+            throw httpError(
+                400,
+                !canManage(req)
+                    ? req.user.external
+                        ? 'You can only add people from your organisation.'
+                        : 'No valid users to add.'
+                    : 'No valid users to add — customers can only join their own organisation’s (non-internal) tickets.',
+            );
         }
 
         // Which are genuinely new (so we only notify those).
@@ -1671,26 +1843,28 @@ router.post('/:id/participants', async (req, res, next) => {
             skipDuplicates: true,
         });
 
-        for (const userId of targetIds) {
-            if (alreadySet.has(userId) || userId === req.user.id) continue;
+        const fresh = targetIds.filter(
+            (uid) => !alreadySet.has(uid) && uid !== req.user.id,
+        );
+        const { staff: newStaff, requesters: newRequesters } =
+            await splitByRole(fresh);
+        for (const u of [...newStaff.map((id) => ({ id, role: 'STAFF' })), ...newRequesters]) {
             try {
-                const isReporter = userId === ticket.reporterId;
                 await notify({
-                    recipientIds: [userId],
+                    recipientIds: [u.id],
                     actorId: req.user.id,
                     type: 'TICKET_ASSIGNED',
                     title: `${ticket.code}: you were added to a ticket`,
                     body: `${req.user.name || 'Someone'} added you to "${ticket.subject}".`,
                     projectId: ticket.projectId,
-                    link: isReporter
-                        ? portalTicketLink(ticket.id)
-                        : agentTicketLink(ticket.id),
+                    link: ticketLinkFor(u, ticket.id),
                     meta: { ticketId: ticket.id },
                 });
             } catch {
                 /* non-fatal */
             }
         }
+        await emitTicketEvent(ticket.id, 'ticket:activity', { ticketId: ticket.id });
         res.status(201).json({ ok: true, added: targetIds.length });
     } catch (err) {
         next(err);
@@ -1744,9 +1918,213 @@ router.post('/:id/log-time', async (req, res, next) => {
     }
 });
 
+// GET /api/tickets/:id/time ---------------------------------------------
+// Time spent on this ticket: entries logged through the ticket's "Log
+// time" (their description starts with "<code> · ", see log-time above)
+// plus anything logged on tasks spun off it via "Add as task". Agents
+// only, same gate as logging.
+router.get('/:id/time', async (req, res, next) => {
+    try {
+        if (!canManage(req)) {
+            throw httpError(403, 'Only agents can see time on a ticket.');
+        }
+        const ticket = await loadVisibleTicket(req, req.params.id);
+        const prefix = `${ticket.code} · `;
+        const taskIds = (ticket.tasks || []).map((t) => t.id);
+        const rows = await prisma.timeEntry.findMany({
+            where: {
+                // Mirrors of personal-project entries would double count.
+                sourceEntryId: null,
+                OR: [
+                    { description: { startsWith: prefix } },
+                    ...(taskIds.length ? [{ taskId: { in: taskIds } }] : []),
+                ],
+            },
+            orderBy: { startedAt: 'desc' },
+            take: 300,
+            select: {
+                id: true,
+                startedAt: true,
+                endedAt: true,
+                durationSeconds: true,
+                description: true,
+                user: {
+                    select: { id: true, name: true, email: true, avatarUrl: true },
+                },
+                task: { select: { id: true, code: true, title: true } },
+            },
+        });
+        const now = Date.now();
+        let totalSeconds = 0;
+        const entries = rows.map((e) => {
+            const running = !e.endedAt;
+            const seconds = running
+                ? Math.max(0, Math.round((now - e.startedAt.getTime()) / 1000))
+                : e.durationSeconds || 0;
+            totalSeconds += seconds;
+            const viaTicket = (e.description || '').startsWith(prefix);
+            // "<code> · <subject> — <note>" → just the note.
+            let note = e.description || '';
+            if (viaTicket) {
+                const dash = note.indexOf(' — ');
+                note = dash >= 0 ? note.slice(dash + 3) : '';
+            }
+            return {
+                id: e.id,
+                startedAt: e.startedAt,
+                endedAt: e.endedAt,
+                seconds,
+                running,
+                note: note.trim() || null,
+                user: e.user,
+                task: viaTicket ? null : e.task,
+            };
+        });
+        res.json({ totalSeconds, entries });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// GET /api/tickets/:id/related ------------------------------------------
+// Tickets worth a look next to this one:
+//   linked     — referenced with "#" from this ticket (description or any
+//                message) or referencing it from another ticket's messages
+//   sameClient — the client's other tickets, newest first; ones sharing a
+//                terminal id (UTMS / Host Tid, serial…) are flagged
+// Everything is filtered through the caller's normal ticket visibility,
+// so this never surfaces a ticket they couldn't open themselves.
+const TICKET_REF = /\/t\/([a-z0-9]{10,40})/gi;
+const TERMINAL_ID_LABEL = /tid\b|terminal\s*id|serial|s\/n|imei/i;
+
+function terminalIdsOf(fieldValues) {
+    const out = new Set();
+    for (const fv of Array.isArray(fieldValues) ? fieldValues : []) {
+        if (fv?.type !== 'TEXT' || !TERMINAL_ID_LABEL.test(fv.label || '')) {
+            continue;
+        }
+        const v = String(fv.value || '').trim().toUpperCase();
+        if (v.length >= 3) out.add(v);
+    }
+    return out;
+}
+
+router.get('/:id/related', async (req, res, next) => {
+    try {
+        if (!canManage(req)) {
+            throw httpError(403, 'Only agents can see related tickets.');
+        }
+        const ticket = await loadVisibleTicket(req, req.params.id);
+        const scope = await scopeWhere(req);
+        const scoped = (extra) => ({ AND: [scope, extra] });
+
+        const own = await prisma.ticketMessage.findMany({
+            where: { ticketId: ticket.id },
+            select: { body: true },
+        });
+        const outIds = new Set();
+        for (const text of [ticket.description || '', ...own.map((m) => m.body || '')]) {
+            for (const m of text.matchAll(TICKET_REF)) {
+                if (m[1] !== ticket.id) outIds.add(m[1]);
+            }
+        }
+        const inbound = await prisma.ticketMessage.findMany({
+            where: {
+                ticketId: { not: ticket.id },
+                body: { contains: `/t/${ticket.id}` },
+            },
+            select: { ticketId: true },
+            take: 200,
+        });
+        const inIds = new Set(inbound.map((m) => m.ticketId));
+        const linkIds = [...new Set([...outIds, ...inIds])];
+
+        const select = {
+            id: true,
+            code: true,
+            subject: true,
+            status: true,
+            priority: true,
+            createdAt: true,
+            fieldValues: true,
+            assignee: { select: { id: true, name: true, avatarUrl: true } },
+            requestType: { select: { name: true, color: true, icon: true } },
+        };
+        const [linked, sameClient] = await Promise.all([
+            linkIds.length
+                ? prisma.ticket.findMany({
+                      where: scoped({ id: { in: linkIds } }),
+                      select,
+                      orderBy: { createdAt: 'desc' },
+                  })
+                : [],
+            ticket.clientId
+                ? prisma.ticket.findMany({
+                      where: scoped({
+                          clientId: ticket.clientId,
+                          id: { not: ticket.id },
+                      }),
+                      select,
+                      orderBy: { createdAt: 'desc' },
+                      take: 25,
+                  })
+                : [],
+        ]);
+
+        const mine = terminalIdsOf(ticket.fieldValues);
+        const summary = ({ fieldValues, ...rest }) => rest;
+        res.json({
+            client: ticket.client
+                ? { id: ticket.client.id, name: ticket.client.name }
+                : null,
+            linked: linked.map((t) => ({
+                ...summary(t),
+                direction:
+                    outIds.has(t.id) && inIds.has(t.id)
+                        ? 'both'
+                        : outIds.has(t.id)
+                          ? 'out'
+                          : 'in',
+            })),
+            sameClient: sameClient.map((t) => ({
+                ...summary(t),
+                sameTerminal:
+                    mine.size > 0 &&
+                    [...terminalIdsOf(t.fieldValues)].some((v) => mine.has(v)),
+            })),
+        });
+    } catch (err) {
+        next(err);
+    }
+});
+
 router.delete('/:id/participants/:userId', async (req, res, next) => {
     try {
         const ticket = await loadVisibleTicket(req, req.params.id);
+        // Requesters can take themselves off, or remove someone they added
+        // — not the agents / watchers, and not on a closed ticket.
+        if (!canManage(req)) {
+            if (ticket.status === 'CLOSED') {
+                throw httpError(409, 'This ticket is closed.');
+            }
+            if (req.params.userId !== req.user.id) {
+                const row = await prisma.ticketParticipant.findUnique({
+                    where: {
+                        ticketId_userId: {
+                            ticketId: ticket.id,
+                            userId: req.params.userId,
+                        },
+                    },
+                    select: { addedById: true },
+                });
+                if (row && row.addedById !== req.user.id) {
+                    throw httpError(
+                        403,
+                        'You can only remove people you added.',
+                    );
+                }
+            }
+        }
         await prisma.ticketParticipant
             .delete({
                 where: {
@@ -1818,7 +2196,14 @@ router.post('/:id/messages', async (req, res, next) => {
             data: {
                 updatedAt: new Date(),
                 ...(reopened
-                    ? { status: 'IN_PROGRESS', closedById: null, closedAt: null }
+                    ? {
+                          status: 'IN_PROGRESS',
+                          closedById: null,
+                          closedAt: null,
+                          // Reopened → no longer closing by itself.
+                          autoCloseAt: null,
+                          autoCloseDays: null,
+                      }
                     : {}),
                 ...(autoTake ? { assigneeId: req.user.id } : {}),
                 ...(autoTakeToProgress ? { status: 'IN_PROGRESS' } : {}),
@@ -1894,8 +2279,14 @@ router.post('/:id/messages', async (req, res, next) => {
             });
         }
 
-        // Live signal so the shared queue reorders without a refresh.
-        realtime.emitToAll('ticket:activity', { ticketId: ticket.id });
+        // Live signal so the shared queue reorders without a refresh. An
+        // internal note is staff business — the requester side isn't pinged.
+        await emitTicketEvent(
+            ticket.id,
+            'ticket:activity',
+            { ticketId: ticket.id },
+            { staffOnly: direction === 'INTERNAL' },
+        );
 
         // Notify the right people about the new comment. Best-effort.
         try {
@@ -1912,10 +2303,20 @@ router.post('/:id/messages', async (req, res, next) => {
                 .trim()
                 .slice(0, 140);
             const actorName = req.user.name || 'Someone';
+            // Everyone on the ticket except the reporter, split by role so
+            // requester-side people get the portal link — and are left out
+            // of internal notes entirely.
+            const { staff: staffOnTicket, requesters: requestersOnTicket } =
+                await splitByRole(
+                    [...watcherIds, ticket.assigneeId].filter(
+                        (uid) => uid && uid !== ticket.reporterId,
+                    ),
+                );
+            const requesterIds = requestersOnTicket.map((u) => u.id);
             if (direction === 'OUTBOUND') {
                 // Agent replied → the requester sees it on their portal.
                 await notify({
-                    recipientIds: [ticket.reporterId],
+                    recipientIds: [ticket.reporterId, ...requesterIds],
                     actorId: req.user.id,
                     type: 'TICKET_COMMENT',
                     title: `${ticket.code}: new reply on your request`,
@@ -1924,13 +2325,8 @@ router.post('/:id/messages', async (req, res, next) => {
                     link: portalTicketLink(ticket.id),
                     meta: { ticketId: ticket.id },
                 });
-                // Watchers / assignee (agents) get the workspace link.
-                const agentRecipients = [
-                    ...watcherIds,
-                    ticket.assigneeId,
-                ].filter((uid) => uid && uid !== ticket.reporterId);
                 await notify({
-                    recipientIds: agentRecipients,
+                    recipientIds: staffOnTicket,
                     actorId: req.user.id,
                     type: 'TICKET_COMMENT',
                     title: `${ticket.code}: new reply`,
@@ -1940,13 +2336,10 @@ router.post('/:id/messages', async (req, res, next) => {
                     meta: { ticketId: ticket.id },
                 });
             } else if (direction === 'INTERNAL') {
-                // Internal note → agents/watchers only, never the requester.
-                const agentRecipients = [
-                    ...watcherIds,
-                    ticket.assigneeId,
-                ].filter((uid) => uid && uid !== ticket.reporterId);
+                // Internal note → staff only; never anyone on the
+                // requester side (reporter, co-requesters, customers).
                 await notify({
-                    recipientIds: agentRecipients,
+                    recipientIds: staffOnTicket,
                     actorId: req.user.id,
                     type: 'TICKET_COMMENT',
                     title: `${ticket.code}: internal note`,
@@ -1956,19 +2349,25 @@ router.post('/:id/messages', async (req, res, next) => {
                     meta: { ticketId: ticket.id, internal: true },
                 });
             } else {
-                // Requester replied → assignee + watchers (agents).
-                const agentRecipients = [
-                    ...watcherIds,
-                    ticket.assigneeId,
-                ].filter(Boolean);
+                // Requester replied → assignee + watchers.
                 await notify({
-                    recipientIds: agentRecipients,
+                    recipientIds: staffOnTicket,
                     actorId: req.user.id,
                     type: 'TICKET_COMMENT',
                     title: `${ticket.code}: requester replied`,
                     body: snippet,
                     projectId: ticket.projectId,
                     link: agentTicketLink(ticket.id),
+                    meta: { ticketId: ticket.id },
+                });
+                await notify({
+                    recipientIds: requesterIds,
+                    actorId: req.user.id,
+                    type: 'TICKET_COMMENT',
+                    title: `${ticket.code}: new comment`,
+                    body: snippet,
+                    projectId: ticket.projectId,
+                    link: portalTicketLink(ticket.id),
                     meta: { ticketId: ticket.id },
                 });
             }
@@ -1989,14 +2388,29 @@ router.post('/:id/messages', async (req, res, next) => {
             if (mentionedIds.length) {
                 const mentioned = await prisma.user.findMany({
                     where: { id: { in: mentionedIds }, status: 'ACTIVE' },
-                    select: { id: true, role: true, external: true },
+                    select: { id: true, role: true, external: true, clientId: true },
                 });
+                const onTicket = new Set(
+                    [ticket.reporterId, ticket.assigneeId, ...watcherIds].filter(Boolean),
+                );
+                const audience = {
+                    internal: ticket.internal,
+                    clientId: ticket.clientId,
+                    reporterId: ticket.reporterId,
+                    participantIds: watcherIds,
+                    shareIds: (ticket.shares || []).map((x) => x.userId),
+                };
                 for (const u of mentioned) {
                     const requesterSide =
                         u.id === ticket.reporterId ||
                         u.role === 'REQUESTER' ||
                         u.external;
                     if (direction === 'INTERNAL' && requesterSide) continue;
+                    // A requester's @mention only reaches people already on
+                    // the ticket (no pinging arbitrary users).
+                    if (!agent && !onTicket.has(u.id)) continue;
+                    // Never send a snippet to a requester who can't see it.
+                    if (u.role === 'REQUESTER' && !requesterCanSee(u, audience)) continue;
                     await notify({
                         recipientIds: [u.id],
                         actorId: req.user.id,
@@ -2027,13 +2441,33 @@ router.post('/:id/messages', async (req, res, next) => {
                     ].map((m) => m[1]),
                 ),
             ).filter((rid) => rid && rid !== ticket.id);
-            if (referencedIds.length && ticket.reporterId) {
+            // Only for a portal (requester) reporter — staff open tickets
+            // the normal way — and only tickets the replying agent can see
+            // themselves, so a reference can't be used to reach anything.
+            const reporter =
+                agent && direction === 'OUTBOUND' && ticket.reporterId
+                    ? await prisma.user.findUnique({
+                          where: { id: ticket.reporterId },
+                          select: { id: true, role: true, external: true, clientId: true },
+                      })
+                    : null;
+            if (referencedIds.length && reporter && reporter.role === 'REQUESTER') {
+                const agentScope = await scopeWhere(req);
                 for (const rid of referencedIds) {
-                    const exists = await prisma.ticket.findUnique({
-                        where: { id: rid },
-                        select: { id: true },
+                    const exists = await prisma.ticket.findFirst({
+                        where: { AND: [{ id: rid }, agentScope] },
+                        select: { id: true, internal: true, clientId: true },
                     });
                     if (!exists) continue;
+                    // Internal tickets are never opened up this way, and a
+                    // customer only gets tickets of their own organisation.
+                    if (exists.internal) continue;
+                    if (
+                        reporter.external &&
+                        (!reporter.clientId || exists.clientId !== reporter.clientId)
+                    ) {
+                        continue;
+                    }
                     await prisma.ticketShare
                         .upsert({
                             where: {
@@ -2067,6 +2501,9 @@ router.post('/:id/messages', async (req, res, next) => {
 // notification linking to it. Anyone who can see the ticket can share it.
 router.post('/:id/share', async (req, res, next) => {
     try {
+        // Agents only — requesters add colleagues as participants instead
+        // (limited to their organisation).
+        if (!canManage(req)) throw httpError(403, 'Only agents can share tickets.');
         const ticket = await loadVisibleTicket(req, req.params.id);
         const userId = String(req.body?.userId || '').trim();
         if (!userId) throw httpError(400, 'Pick someone to share with.');
@@ -2075,9 +2512,17 @@ router.post('/:id/share', async (req, res, next) => {
         }
         const target = await prisma.user.findUnique({
             where: { id: userId },
-            select: { id: true, role: true, external: true },
+            select: { id: true, role: true, external: true, clientId: true, status: true },
         });
         if (!target) throw httpError(404, 'User not found.');
+        if (!staffMayAddToTicket(target, ticket)) {
+            throw httpError(
+                400,
+                target.status !== 'ACTIVE'
+                    ? 'That account is not active.'
+                    : 'Customers can only see their own organisation’s (non-internal) tickets.',
+            );
+        }
         // Grant access: a read-only "shared with" record (NOT a participant,
         // so they aren't subscribed to every future message) — unless they
         // already have an intrinsic role on the ticket (reporter / assignee).

@@ -24,6 +24,7 @@ import {
     BarChart3,
     BellRing,
     Bug,
+    Building2,
     CalendarRange,
     Check,
     CheckCircle2,
@@ -33,10 +34,13 @@ import {
     ChevronsLeft,
     ChevronsRight,
     CirclePlay,
+    ClipboardCheck,
     Clock,
+    Compass,
     Copy,
     Download,
     Eye,
+    FileDiff,
     FileQuestion,
     FileText,
     Filter,
@@ -48,6 +52,7 @@ import {
     Hash,
     Highlighter,
     Info,
+    KeyRound,
     Layers,
     LayoutDashboard,
     LayoutList,
@@ -69,6 +74,7 @@ import {
     RefreshCw,
     Reply,
     Repeat,
+    ScrollText,
     Search,
     Send,
     Settings2,
@@ -79,6 +85,7 @@ import {
     Stethoscope,
     Tag,
     TestTube2,
+    Ticket,
     Timer,
     Trash2,
     Undo2,
@@ -126,6 +133,11 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
+import {
+    HelpSubTopic,
+    TEMPLATE_GUIDE_TOPICS,
+    templatesGuideBody,
+} from '@/components/HelpTemplatesGuide';
 
 // Icon legend — grouped by intent so a new user can scan for what
 // they're seeing on a page. Order matters: we keep the most common
@@ -390,7 +402,7 @@ const ICON_LEGEND_GROUPS = [
             {
                 Icon: Hash,
                 name: 'Code / identifier',
-                desc: 'Used inline with codes like P-25-007 / T-0042 / ST-0010.',
+                desc: 'Used inline with codes like P26-USA-0001 / T-0042 / ST-0010 / TKT-0042.',
             },
             {
                 Icon: Tag,
@@ -497,8 +509,8 @@ const ICON_LEGEND_GROUPS = [
             },
             {
                 Icon: LifeBuoy,
-                name: 'Support',
-                desc: 'The Help page header / sidebar entry.',
+                name: 'Ticketing / help desk',
+                desc: 'The Tickets workspace, ticket types and the requester portal.',
             },
             {
                 Icon: Bug,
@@ -564,7 +576,7 @@ const ICON_LEGEND_GROUPS = [
             {
                 Icon: Pin,
                 name: 'Pin / bookmark',
-                desc: 'Pin a project to the top of the list, or bookmark an activity row for follow-up. Per-user.',
+                desc: 'Pin a project or an activity row for yourself \u2014 the \u201cPinned only\u201d filter then shows just those. Per-user.',
             },
             {
                 Icon: Star,
@@ -614,13 +626,14 @@ const SECTIONS = [
         icon: LayoutDashboard,
         accent: 'text-primary',
         title: 'Welcome',
-        lead: `${APP_NAME} is a single workspace for projects, application releases, time tracking and the SDLC procedure around them.`,
+        lead: `${APP_NAME} is a single workspace for projects, application releases, time tracking, the help desk and the procedure around them.`,
         body: (
             <>
                 <p>
-                    The app is organised around four pillars: project
+                    The app is organised around five pillars: project
                     management, application release management, time
-                    tracking, and an audit trail across everything that
+                    tracking, the help desk (tickets and the requester
+                    portal), and an audit trail across everything that
                     changes. The sidebar groups every feature by intent
                     — <strong>Work</strong>, <strong>People</strong>,{' '}
                     <strong>Insights</strong> and{' '}
@@ -633,7 +646,10 @@ const SECTIONS = [
                     (Admin / Manager / App Moderator / User) and on the
                     granular capabilities an administrator has granted
                     you. If something looks missing, ask an admin to
-                    tick the right capability on your profile.
+                    tick the right capability on your profile. A fifth
+                    role, <strong>Requester</strong>, never sees this
+                    workspace: requesters only use the ticket portal (see{' '}
+                    <em>Requester portal</em>).
                 </p>
             </>
         ),
@@ -668,6 +684,104 @@ const SECTIONS = [
         ),
     },
     {
+        id: 'navigation',
+        icon: Compass,
+        accent: 'text-primary',
+        title: 'Getting around: sidebar, top bar, search & chat',
+        lead: 'Where things are: sidebar groups, the admin tabs, the top bar (search with Ctrl/⌘+K, timer, theme, What’s new, notifications, help) and the floating chat bubble.',
+        body: (
+            <>
+                <p>
+                    <strong>Sidebar.</strong> The groups (Work, People,
+                    Insights, Admin) fold open and closed, and the group of
+                    the page you&apos;re on opens by itself. The button at
+                    the top turns the sidebar into an icon rail (hover an
+                    icon for its label). Your profile card sits at the
+                    bottom, and the version line under it opens this Help
+                    page.
+                </p>
+                <p>
+                    <strong>Admin.</strong> Admins have one Admin entry that
+                    opens the admin area, with folder tabs across the top:
+                    Announcements · Templates · Time logging · Logs (only for
+                    people with the logs capability) · Billing.
+                </p>
+                <p>
+                    <strong>Top bar.</strong> Search (<kbd>Ctrl</kbd>/
+                    <kbd>⌘</kbd>+<kbd>K</kbd>) finds projects by name,
+                    description, code or label — and by what&apos;s inside
+                    them: tasks and subtasks, notes, files and phases (a
+                    result opens its project). Next to it: the timer pill
+                    (<em>Start timer</em> → pick a project / task; Stop), the
+                    theme button (Light → Dark → Dim → System),{' '}
+                    <em>What&apos;s new</em>, the notification bell (with{' '}
+                    <em>Mark all read</em>), Help and Log out.
+                </p>
+                <p>
+                    <strong>Chat bubble.</strong> The round button at the
+                    bottom right (hidden on Messages) opens a quick chat:
+                    people with online dots, direct messages with a typing
+                    indicator, and a sound picker / mute for new messages.
+                </p>
+            </>
+        ),
+    },
+    {
+        id: 'accounts',
+        icon: KeyRound,
+        accent: 'text-rose-600',
+        title: 'Accounts: sign-up, approval, passwords & sessions',
+        lead: 'How people join (and wait for approval), how a forgotten password is reset, and how signing out works.',
+        body: (
+            <>
+                <ul className="ml-5 list-disc space-y-1">
+                    <li>
+                        <strong>Sign up</strong> with name, e-mail and a
+                        password of at least 8 characters. The very first
+                        account becomes the Admin and is signed in straight
+                        away.
+                    </li>
+                    <li>
+                        Everyone after that is <strong>pending</strong>: they
+                        see an &ldquo;Awaiting approval&rdquo; screen and get a
+                        confirmation e-mail, and admins get a notification plus
+                        the badge on Users. Approving sends a welcome e-mail.
+                    </li>
+                    <li>
+                        A sign-up starts as a <strong>customer</strong>{' '}
+                        (external requester) with no organisation — the
+                        lowest access there is — so the portal can safely be
+                        opened to outside users. <em>Approve</em> asks what the
+                        account really is: <em>Customer</em> (pick the
+                        organisation), <em>Employee requester</em> (pick the
+                        ticket types they may raise) or <em>Staff user</em>{' '}
+                        (pick the role).
+                    </li>
+                    <li>
+                        Pending and suspended accounts can&apos;t sign in — the
+                        attempt shows as <em>Blocked</em> in Logs.
+                    </li>
+                    <li>
+                        <strong>Forgot password</strong> always answers the
+                        same way, so nobody can probe which e-mails exist. The
+                        e-mailed link works for 60 minutes; an expired link
+                        offers a new one. Admins can also send a reset link
+                        from Users.
+                    </li>
+                    <li>
+                        Resetting a password signs that account out
+                        everywhere; changing it in Edit profile keeps this
+                        device signed in.
+                    </li>
+                    <li>
+                        <strong>Log out</strong> ends your sessions on every
+                        device.
+                    </li>
+                </ul>
+            </>
+        ),
+    },
+    {
         id: 'projects',
         icon: FolderKanban,
         accent: 'text-sky-600',
@@ -686,15 +800,26 @@ const SECTIONS = [
                     persist in your browser, no save button needed.
                 </p>
                 <p>
+                    Switch between a <em>table</em> and <em>cards</em>,
+                    sort (newest, oldest, ending or starting soonest,
+                    recently updated, name A–Z…), pin projects for the{' '}
+                    <em>Pinned only</em> filter, share a project (copy the
+                    link or send it as a message) and export the list to
+                    Excel. <strong>Personal projects</strong> are private:
+                    only the owner and the people they invite see them.
+                </p>
+                <p>
                     Click any row to enter the project. Inside, the
                     tabs cover everything from the plan (phases →
                     tasks → subtasks) to notes (with @-mentions and
                     image/file embeds), files, contacts, activity,
-                    billing and the project timeline.
+                    billing, change requests, its tickets, a project
+                    chat for participants and the project timeline.
                 </p>
                 <p>
                     <strong>Tip — codes:</strong> every project gets a
-                    short code like <code>P-25-USA-0001</code>, every
+                    short code like <code>P26-USA-0001</code> (year,
+                    country, number — see Templates → Countries), every
                     task <code>T-0001</code>, every subtask{' '}
                     <code>ST-0001</code>. Codes are globally searchable
                     from the top bar, and any code typed in a note
@@ -776,12 +901,12 @@ const SECTIONS = [
                     </li>
                 </ul>
                 <p>
-                    When the note is later <em>rendered</em>, every
+                    When the note is later <em>rendered</em>, every{' '}
                     <code>T-####</code> / <code>ST-####</code> token
                     becomes a clickable chip that takes the reader
                     straight to that task and pulses the row on arrival.
                     You can also write a cross-project reference like{' '}
-                    <code>P-25-USA-0001/T-0042</code> by hand — the
+                    <code>P26-USA-0001/T-0042</code> by hand — the
                     renderer resolves it the same way.
                 </p>
                 <p>
@@ -848,6 +973,49 @@ const SECTIONS = [
         ),
     },
     {
+        id: 'change-requests',
+        icon: FileDiff,
+        accent: 'text-sky-600',
+        title: 'Change requests',
+        lead: 'Extra scope on a signed project: each change request (CR) has its own estimate, internal and client amounts, plan, notes and files — and adds to the contracted value.',
+        body: (
+            <>
+                <p>
+                    Open a project → <strong>Change requests</strong>. The{' '}
+                    <em>Contracted value</em> card shows the project total —
+                    the original SOW plus every CR — for both the internal
+                    and the client amount.
+                </p>
+                <ul className="ml-5 list-disc space-y-1">
+                    <li>
+                        <strong>New CR:</strong> title, description, status,
+                        estimated hours, internal and client amounts (in the
+                        project&apos;s currency). Each gets a code like{' '}
+                        <code>P26-USA-0001-CR-001</code>.
+                    </li>
+                    <li>
+                        <strong>The CR page</strong> has tabs: <em>Plan</em>{' '}
+                        (the project&apos;s phases, showing only this CR&apos;s
+                        tasks), <em>Notes</em>, <em>Files</em>,{' '}
+                        <em>Overview</em> (billing with paid flags, code,
+                        creator, dates) and <em>Estimation</em> (coming soon).
+                    </li>
+                    <li>
+                        The project&apos;s Billing card lists every CR and the
+                        contracted total.
+                    </li>
+                    <li>
+                        <strong>Who can:</strong> anyone who can read the
+                        project can read its CRs. Creating and editing needs
+                        admin or the <em>Create / Edit change requests</em>{' '}
+                        capability (managers by default); deleting needs admin
+                        or <em>Delete change requests</em> — and is permanent.
+                    </li>
+                </ul>
+            </>
+        ),
+    },
+    {
         id: 'sprints',
         icon: Zap,
         accent: 'text-violet-600',
@@ -876,8 +1044,10 @@ const SECTIONS = [
                         between two active iterations on different
                         teams. The picker groups options by status:
                         active first, then planned chronologically,
-                        then closed most-recent-first. Two columns:
-                        Backlog vs the selected sprint. Drag a task to
+                        then closed most-recent-first. A planned or
+                        closed sprint shows two columns, Backlog and the
+                        sprint; an active sprint shows Backlog plus On
+                        hold, To do, In progress and Done. Drag a task to
                         commit it; drag it back out to send it to the
                         backlog. CLOSED sprints are{' '}
                         <strong>read-only</strong> — the picker still
@@ -1081,10 +1251,17 @@ const SECTIONS = [
                     straight to the task in its project.
                 </p>
                 <p>
-                    The <em>My activities</em> tab inside this page
-                    shows the activity feed scoped to events you
-                    participated in — useful when you want a quick
-                    "what did I do this week" read.
+                    Four tabs: <em>My activities</em> (meetings, calls and
+                    reminders assigned to you), <em>All activities</em>{' '}
+                    (every scheduled activity in the projects you can
+                    see), <em>To-do</em> (your personal to-dos plus the
+                    project tasks assigned to you — Open / Done / All,
+                    sort by your own order, newest, priority or due
+                    date, and <em>Clear completed</em>) and{' '}
+                    <em>My tickets</em> (help-desk tickets you took).
+                    Admins and managers get a <em>Viewing</em> picker to
+                    look at one person's list — or everyone's open
+                    to-dos, with team and project filters.
                 </p>
             </>
         ),
@@ -1126,18 +1303,41 @@ const SECTIONS = [
             <>
                 <p>
                     <Link to="/time" className="text-primary hover:underline">Time tracking</Link>
-                    {' '}has a live timer in the sidebar — start it
-                    when you begin work, stop it when you finish. For
-                    historical entries use <em>Log time</em> with
-                    30-minute steps.
+                    {' '}has a live timer in the top bar — click{' '}
+                    <em>Start timer</em>, pick the project / task, and
+                    stop it when you finish. For historical entries use{' '}
+                    <em>Log time</em> with 30-minute steps. Logging time
+                    on <strong>someone else's</strong> task asks for a
+                    reason (Helping, Participating, Covering — out of
+                    office, Correcting / fixing, Other), which lands in
+                    the export.
+                </p>
+                <p>
+                    The <em>Log time</em> pickers tag what's yours.
+                    Projects read <strong>Owner</strong> (you own
+                    it), <strong>My tasks</strong> (at least one task
+                    is assigned to you) or <strong>Member</strong>{' '}
+                    (you're a participant — shown to admins and
+                    managers, who see every project). Tasks read{' '}
+                    <strong>You</strong> or the assignee's name —
+                    hover for the full name, and you can search tasks
+                    by assignee too. Admins and managers also get an{' '}
+                    <strong>Only mine</strong> switch in the form
+                    header that hides every other project and task;
+                    it's remembered on this browser.
                 </p>
                 <p>
                     Time rolls up automatically: subtask → task →
                     project → application. Switch to the{' '}
                     <strong>Charts</strong> tab for daily / per-user /
-                    per-project bars. Admins see an extra <em>All
-                    users</em> spreadsheet with filters and CSV
-                    export.
+                    per-project bars. Admins (and anyone with{' '}
+                    <em>View all users&apos; time entries</em>) also get
+                    the <em>All users</em> spreadsheet with filters and
+                    CSV export, and <em>Timesheet gaps</em>: pick a date
+                    range, a daily target (7.5 h by default), people and
+                    whether weekends count — each day shows as a bar
+                    (green = met, amber = short, dashed red = nothing
+                    logged); click a day to see its entries.
                 </p>
                 <p>
                     Both the <strong>Charts</strong> and{' '}
@@ -1240,14 +1440,17 @@ const SECTIONS = [
                     choice is remembered in your browser.
                 </p>
                 <p>
-                    <strong>Roles:</strong> Admins and Managers can
-                    create / edit applications and releases.{' '}
-                    <em>App Moderators</em> can declare phase
-                    transitions. Anyone with the{' '}
-                    <code>app:checkpoint:add</code> capability can log
-                    a deployment / rollback checkpoint against a
-                    release (operator-level audit trail, separate from
-                    the formal phase change).
+                    <strong>Roles:</strong> Admins, Managers and{' '}
+                    <em>App Moderators</em> can create and edit
+                    applications and releases, comment, and declare a
+                    release's phase (Test / Pilot / Approved). Deleting
+                    apps and releases is admin-only unless granted.
+                    Anyone with <em>Add timeline checkpoints</em> can
+                    log a deployment / rollback checkpoint against a
+                    release (an operator-level audit trail, separate
+                    from the formal phase change). The release form's{' '}
+                    <em>Target OS</em> and <em>POS terminal type</em>{' '}
+                    lists come from Templates → Apps.
                 </p>
             </>
         ),
@@ -1271,20 +1474,37 @@ const SECTIONS = [
                         Tickets
                     </Link>{' '}
                     workspace to handle them. Both show the same ticket in
-                    list, grid or board views, and open it in a modal with the
-                    full conversation on the left and people / attachments /
-                    captured details on the right.
+                    list, grid or board views, and open it in the same ticket
+                    window — requesters just get their own actions:
+                    comment and attach files, add colleagues or groups, and
+                    edit (title, description, priority) or delete the
+                    request until support picks it up. Internal notes, time,
+                    related tickets and the project stay agent-only.
                 </p>
 
                 <p>
                     <strong>Raising a request.</strong> On the portal a
-                    requester picks a <em>request type</em> card, then fills a
-                    short form: a title, a category (Incident / Problem /
-                    Question / Request) and priority chosen as icon chips, a
-                    description, plus any <em>custom fields</em> the admin
-                    attached to that type. They can attach files and share the
-                    ticket with extra people or a group. They never pick a
-                    project — a resolver assigns it later.
+                    requester picks a <em>request type</em> card, then fills
+                    the <em>Raise new ticket</em> form: a title, a category
+                    (Incident / Problem / Question / Request) and priority
+                    chosen as cards, a formatted <em>description</em> (bold,
+                    lists, links, emoji — with a <em>Preview</em>; required),
+                    plus any <em>custom fields</em> the admin attached to that
+                    type — the terminal on its own row, then Client, Share
+                    with and Attachments on one line. Files can be dragged
+                    in, picked from the editor’s paperclip, or pasted as
+                    screenshots. They never pick a project — a resolver
+                    assigns it later. Next to the form is that type’s{' '}
+                    <em>help panel</em>: <em>Tips for a good ticket</em>,{' '}
+                    <em>Related resources</em> links and a <em>Need urgent
+                    help?</em> contact (phone, e-mail or link). An admin sets
+                    them per type in{' '}
+                    <em>Admin → Templates → Ticket types → Edit → Help
+                    panel</em> — e.g. “include the TID” and the POS on-call
+                    number for POS problems; links and the contact card hide
+                    until they’re filled in. Agents’ <em>New ticket</em>{' '}
+                    dialog uses the same form (with the built-in tips), plus
+                    project and visibility.
                 </p>
 
                 <p>
@@ -1292,11 +1512,22 @@ const SECTIONS = [
                     through <em>New → In progress → Pending → Resolved →
                     Closed</em>. Taking a ticket or replying moves it to In
                     progress. <em>Resolved</em> still accepts replies — a
-                    requester reply reopens it. <em>Closed</em> is a locked,
+                    requester reply reopens it. When you set a ticket to
+                    Resolved you can have it <em>close automatically</em>{' '}
+                    after a number of days (1–90; 2 by default, and your last
+                    choice is remembered) — switch it on or off and pick the
+                    days in the side panel under Status, then save. “Send &
+                    set Resolved” uses your usual number of days. The
+                    requester sees when it will close, and their reply
+                    cancels it; the timeline then shows “Closed
+                    automatically”. <em>Closed</em> is a locked,
                     terminal state: no comments, attachments, people or
                     priority changes — only a resolver can reopen it (by
                     changing its status), after which it&apos;s editable
-                    again.
+                    again. The requester (and requester-side people on the
+                    ticket) get a notification when it goes Pending,
+                    Resolved — including when it will close by itself —
+                    Closed, or is reopened.
                 </p>
 
                 <p>
@@ -1309,6 +1540,42 @@ const SECTIONS = [
                     turn a ticket into a project task with{' '}
                     <em>Add as task</em> — it lands in the project/phase they
                     choose, prefilled from the ticket and linked back to it.
+                    Only active staff can be the assignee. When adding people
+                    or sharing, customers (external requesters) are only
+                    offered — and only accepted — on non-internal tickets of
+                    their own organisation, so a ticket can&apos;t be shown
+                    to the wrong customer by mistake.
+                </p>
+
+                <p>
+                    <strong>The ticket window.</strong> The header shows the
+                    ticket number (click the copy icon to copy it), its
+                    request type, who opened it and when, plus{' '}
+                    <em>Share</em>, <em>Follow</em> (get notified without
+                    being the assignee), <em>Log time</em>,{' '}
+                    <em>Add to task</em> and <em>More</em> (assign to me,
+                    copy link, delete). The middle column holds the{' '}
+                    <strong>description</strong> — folded to one line so
+                    the conversation gets the room; click it to open (agents
+                    can <em>Edit</em> it) — and tabs:{' '}
+                    <em>Conversation</em> (your messages on the right in
+                    blue, everyone else&apos;s on the left in grey, internal
+                    notes in amber),{' '}
+                    <em>Internal notes</em>, <em>Time tracking</em> (time
+                    logged on the ticket and its tasks),{' '}
+                    <em>Related tickets</em> (the same client&apos;s other
+                    tickets — same terminal flagged — and tickets linked
+                    with #) and the <em>Activity log</em>. On the right:
+                    status, priority, assignee and project (changes are
+                    staged until you click <em>Save changes</em>), then{' '}
+                    <em>Client &amp; Terminal</em> and <em>Contact</em>{' '}
+                    details with copy buttons, <em>People</em> (folded to
+                    an avatar row — click to open) and attachments.{' '}
+                    <em>Follow</em> makes you a watcher; click{' '}
+                    <em>Following</em> again to unfollow. Each
+                    message has a ⋯ menu to copy or quote it, and the{' '}
+                    <em>Send ▾</em> menu sends and sets a status (e.g.
+                    Pending or Resolved) in one go.
                 </p>
 
                 <p>
@@ -1344,12 +1611,13 @@ const SECTIONS = [
                     <strong>Custom fields per type.</strong> When editing a
                     ticket type (Templates → Tickets → Ticket types), admins
                     add the fields requesters must fill for that type:{' '}
-                    <em>Terminal</em> (cascading Vendor → Model → OS, drawn
-                    from the Terminals catalog), <em>Client</em>,{' '}
-                    <em>Text</em> (e.g. Merchant ID, Host TID),{' '}
-                    <em>Multi-select</em>, and <em>Yes / No</em>. Any field can
-                    be marked required. The captured values show in the
-                    ticket&apos;s Details panel.
+                    <em>Terminal</em> (OS → Vendor → Model, from the
+                    Terminals catalogue), <em>Client</em>, <em>Text</em>{' '}
+                    (e.g. Merchant ID, Host TID), <em>Multi-select</em>{' '}
+                    and <em>Yes / No</em>. Any field can be marked
+                    required. The captured values show in the ticket
+                    window&apos;s <em>Client &amp; Terminal</em>,{' '}
+                    <em>Contact</em> and <em>Other details</em> cards.
                 </p>
 
                 <p>
@@ -1360,7 +1628,12 @@ const SECTIONS = [
                     tickets plus their organisation&apos;s. Tickets an external
                     user raises are auto-tagged to their organisation, and each
                     client can be limited (on its edit screen) to just the
-                    ticket types its users may raise.
+                    ticket types its users may raise. External users can only
+                    add colleagues of their own organisation, see names (not
+                    e-mail addresses) of other people, and never see internal
+                    tickets, internal notes or files attached to them. All
+                    requester accounts are limited to the portal — every other
+                    part of the API refuses them.
                 </p>
 
                 <p>
@@ -1369,9 +1642,84 @@ const SECTIONS = [
                     icon, default priority, agent visibility and custom
                     fields), <em>Requester groups</em> (add many people to a
                     ticket at once), and <em>Terminals</em> (vendors and their
-                    models with OS type). Every project also has a{' '}
-                    <em>Tickets</em> tab listing the tickets linked to it.
+                    models with OS type) — every option is explained under{' '}
+                    <a href="#templates-ticket-types" className="text-primary hover:underline">
+                        Templates → Ticket types
+                    </a>
+                    . Every project also has a <em>Tickets</em> tab listing
+                    the tickets linked to it.
                 </p>
+            </>
+        ),
+    },
+    {
+        id: 'portal',
+        icon: Ticket,
+        accent: 'text-sky-600',
+        title: 'Requester portal',
+        lead: 'What people with the Requester role see at /portal: the ticket types they may raise, their requests, statistics and their ticket window.',
+        body: (
+            <>
+                <p>
+                    Requesters never see the workspace — every workspace link
+                    sends them to the portal, and ticket links (
+                    <code>/t/…</code>) open the portal version of the ticket.
+                    They can&apos;t open this Help page — the portal has its
+                    own, simpler Help (the <em>Help</em> link in its header)
+                    — so this section is for admins and agents who onboard
+                    them.
+                </p>
+                <ul className="ml-5 list-disc space-y-1">
+                    <li>
+                        <strong>Header:</strong> a Home page link, their name
+                        (Edit profile), <em>Help</em>, a bell with their
+                        ticket notifications, and Sign out. Announcements
+                        show up here too.
+                    </li>
+                    <li>
+                        <strong>Cards:</strong> one per ticket type they may
+                        raise — granted on the client (external requesters)
+                        or on the user (internal requesters); see{' '}
+                        <a href="#templates-ticket-types" className="text-primary hover:underline">
+                            Templates → Ticket types
+                        </a>
+                        . A card opens <em>Raise new ticket</em> with that
+                        type&apos;s fields and help panel.
+                    </li>
+                    <li>
+                        <strong>Requests:</strong> All / Mine / Pinned, a
+                        status filter (by default <em>Open requests</em>,
+                        which hides Resolved and Closed), search by title or
+                        code, and List / Grid / Board views (remembered). The
+                        list updates live.
+                    </li>
+                    <li>
+                        <strong>Statistics:</strong> <em>My tickets</em>{' '}
+                        (Open, Resolved incl. the last 30 days, average
+                        resolution — click a tile to filter the list) and{' '}
+                        <em>All tickets</em> — counts over every ticket they
+                        can see (Total, Open, Resolved, Unassigned, by status
+                        and by category; no subjects, people or other
+                        organisations).
+                    </li>
+                    <li>
+                        <strong>Their ticket window:</strong> comment and
+                        attach files, add colleagues or requester groups, and
+                        edit (title, description, priority) or delete the
+                        request until support takes it. A resolved ticket says when it
+                        will close automatically — replying reopens it. Closed
+                        tickets are read-only.
+                    </li>
+                    <li>
+                        <strong>Internal</strong> requesters see the shared
+                        queue; <strong>external</strong> ones (customers,
+                        tied to an organisation) see only their
+                        organisation&apos;s tickets, plus tickets without an
+                        organisation that they raised or were added to —
+                        never internal tickets or another organisation&apos;s,
+                        even if they were added to one earlier.
+                    </li>
+                </ul>
             </>
         ),
     },
@@ -1407,8 +1755,13 @@ const SECTIONS = [
                 <p>
                     A <em>Period</em> filter (All time / Last 7 / 15 / 30 days
                     / Custom range) scopes every figure to items created in that
-                    window, and admins get a <em>Viewing</em> picker to inspect
-                    a single user&apos;s numbers.
+                    window, and a <em>Team</em> filter narrows every tab to
+                    one team. Admins (and anyone with <em>View workspace-wide
+                    insights</em>) get a <em>Viewing</em> picker to inspect a
+                    single user&apos;s numbers. The <em>Tasks</em> tab opens
+                    with a Gantt-style <em>task timeline</em> (range presets
+                    such as the next 7 days or a custom range; click a bar to
+                    open the task).
                 </p>
             </>
         ),
@@ -1426,6 +1779,13 @@ const SECTIONS = [
                     {' '}to scrub through everything that has happened.
                     Filter by event type, search by free text, and
                     click any row to jump into the underlying entity.
+                </p>
+                <p>
+                    Narrow it by date range, project, change request
+                    or person, or show <em>Pinned only</em>. Deleted{' '}
+                    <strong>projects, tasks and tickets</strong> appear
+                    with a <em>Restore</em> button that brings them back
+                    intact.
                 </p>
                 <p>
                     The feed is append-only — entries are never edited
@@ -1450,10 +1810,13 @@ const SECTIONS = [
                         Announcements
                     </Link>{' '}
                     to compose a message. Pick a <strong>type</strong> —
-                    Important (red), Information (green) or Good to know
-                    (orange) — and an <strong>audience</strong>: everyone,
-                    internal staff, external users, or specific roles, teams
-                    or people.
+                    Important (red), Information (green), Good to know
+                    (orange) or Mandatory (blue) — and an{' '}
+                    <strong>audience</strong>: everyone, internal staff,
+                    external users, or specific roles, teams or people. The
+                    modal shows the icon with your title tinted in the type
+                    colour; the type name itself is only the label beside each
+                    icon here in the composer.
                 </p>
                 <p>
                     Choose how people respond: informational (just a Close
@@ -1462,6 +1825,24 @@ const SECTIONS = [
                     live, without a reload, for anyone online. Each
                     acknowledgement (and any reply) is recorded so you can see
                     who&apos;s seen it and who&apos;s still pending.
+                </p>
+                <p>
+                    Write the message in the <strong>rich editor</strong>:
+                    headings, bold / italic / underline, quotes, links, text
+                    alignment and inline <strong>images</strong>. Images can be
+                    uploaded from your computer (with a progress bar) or added
+                    by URL, then aligned left / center / right and resized —
+                    either with size presets or by typing an exact pixel width
+                    or height with the aspect ratio locked.
+                </p>
+                <p>
+                    <strong>Mandatory</strong> is a special service-migration
+                    notice: it <strong>can&apos;t be dismissed</strong> —
+                    targeted users get a blocking, full-screen modal whose only
+                    button sends them to a new address you set. Use it when the
+                    service moves. Because it blocks everyone (including admins)
+                    on the current address, activate it only at cut-over and
+                    manage it from the new address afterwards.
                 </p>
                 <p>
                     <strong>Repeat</strong> on a schedule, <strong>Re-send</strong>{' '}
@@ -1504,6 +1885,43 @@ const SECTIONS = [
         ),
     },
     {
+        id: 'logs',
+        icon: ScrollText,
+        accent: 'text-rose-600',
+        title: 'Logs (super admin)',
+        lead: 'Admin → Logs: the sign-in audit trail and the server’s access, application and error logs — only for holders of “View logs & sign-in audit”.',
+        body: (
+            <>
+                <p>
+                    <strong>Who:</strong> the Logs tab appears only for users
+                    with <em>View logs &amp; sign-in audit</em> (Users → edit
+                    → capabilities → Logs &amp; audit). Admins don&apos;t get
+                    it automatically — tick it for the few people who need it.
+                </p>
+                <ul className="ml-5 list-disc space-y-1">
+                    <li>
+                        <strong>Sign-in log:</strong> every login attempt with
+                        time, e-mail, outcome (<em>Success</em>,{' '}
+                        <em>Failed</em>, <em>Blocked</em>), reason (signed in,
+                        wrong password, unknown e-mail, awaiting approval,
+                        suspended account) and IP address. Filter by e-mail or
+                        outcome, 25 / 50 / 100 rows per page, Refresh, and{' '}
+                        <em>Export CSV</em> (the filtered log, up to 10,000
+                        rows, including the browser / device).
+                    </li>
+                    <li>
+                        <strong>Server logs:</strong> a read-only tail of the{' '}
+                        <em>Access</em> (every request), <em>Application</em>{' '}
+                        or <em>Errors</em> log — the last 200, 500 or 1000
+                        lines, newest at the bottom. If the server has no
+                        writable log folder, it says so (logs then only go to
+                        the container output).
+                    </li>
+                </ul>
+            </>
+        ),
+    },
+    {
         id: 'users',
         icon: Users,
         accent: 'text-emerald-600',
@@ -1515,16 +1933,34 @@ const SECTIONS = [
                     Admins can open <Link to="/users" className="text-primary hover:underline">Users</Link>
                     {' '}to approve pending registrations, edit
                     profiles, change roles (Admin / Manager / App
-                    Moderator / User), and tick the granular
+                    Moderator / User / Requester), and tick the granular
                     capability checkboxes when a user needs a
                     specific power their base role doesn&apos;t grant
-                    by default.
+                    by default. Everyone else sees a read-only
+                    directory of active teammates (search, role filter,
+                    open profile, message).
                 </p>
                 <p>
                     Pending sign-ups show a badge in the sidebar so
-                    you don&apos;t miss them. When you approve a user
-                    they receive a welcome email and can sign in
-                    immediately.
+                    you don&apos;t miss them. <em>Approve</em> first asks for
+                    the account type — Customer (with organisation), Employee
+                    requester or Staff user (with role) — then they receive
+                    a welcome email and can sign in immediately. Under the
+                    role badge, requesters show their organisation (or{' '}
+                    <em>Internal</em>). Filter by status (Pending / Active /
+                    Suspended) and role; the row menu offers Open profile,
+                    Approve / Reactivate, Suspend, Message, Edit,{' '}
+                    <em>View as</em> (read-only: their time entries or
+                    activity feed), <em>Send reset link</em> (also shown
+                    as a link you can copy) and Reject / Delete.
+                </p>
+                <p>
+                    The edit dialog also holds the business unit, employee
+                    code, <em>Time logging mandatory</em> and — for the
+                    Requester role — <em>Internal</em> (sees the shared
+                    ticket queue) or <em>External</em> (must belong to an
+                    organisation = client) plus, for internal requesters,
+                    the ticket types they may raise.
                 </p>
                 <p>
                     Click any name (or pick <em>Open profile</em> from
@@ -1544,9 +1980,8 @@ const SECTIONS = [
             <>
                 <p>
                     Click any teammate&apos;s name (Users list, sprint
-                    cards, comments, mentions) or pick{' '}
-                    <em>View profile</em> from your own avatar menu in
-                    the top-bar. The page is read-only to teammates and
+                    cards, comments, mentions) or open your own from the
+                    profile card at the bottom of the sidebar. The page is read-only to teammates and
                     editable by admins via the <em>Edit</em> action.
                 </p>
                 <p>
@@ -1557,7 +1992,8 @@ const SECTIONS = [
                     belong to, KPI tiles for projects / tasks / sprints
                     / applications / releases / logged hours (last 7d
                     and last 30d), and a GitHub-style time-tracking
-                    heatmap of the last 12 weeks.
+                    heatmap you can switch between 4, 12, 26 and 52
+                    weeks.
                 </p>
                 <p>
                     On your own profile a <em>Personal highlights</em>
@@ -1598,22 +2034,90 @@ const SECTIONS = [
         ),
     },
     {
-        id: 'reassignments',
-        icon: UserCog,
+        id: 'clients',
+        icon: Building2,
         accent: 'text-emerald-600',
-        title: 'Reassignments',
-        lead: 'A lightweight approval workflow for moving a task between assignees, with rationale notes visible to both sides.',
+        title: 'Clients (admin)',
+        lead: 'The companies you work for: contacts, country, linked projects — and which ticket types their external users may raise.',
         body: (
             <>
                 <p>
-                    Any participant can <em>propose</em> a
-                    reassignment from inside the task. The current
-                    assignee, the project owner and any admin /
-                    manager can review pending proposals at{' '}
-                    <Link to="/reassignments" className="text-primary hover:underline">Reassignments</Link>
-                    {' '}and approve or decline with a comment. The
-                    proposer sees the decision + comment too.
+                    Admins open <Link to="/clients" className="text-primary hover:underline">Clients</Link> (in
+                    the Work group). The table shows name and e-mail,
+                    location, main contact and number of projects; search
+                    also matches contacts.
                 </p>
+                <ul className="ml-5 list-disc space-y-1">
+                    <li>
+                        <strong>Fields:</strong> name (required), address,
+                        country (from Templates → Countries), city, postal
+                        code, phone, e-mail, website, notes and an Active
+                        switch.
+                    </li>
+                    <li>
+                        <strong>Contacts:</strong> as many as you need (name,
+                        role, e-mail, phone) — star the primary one.
+                    </li>
+                    <li>
+                        <strong>Ticket types this client can raise</strong> —
+                        what its external requesters see on the portal; none
+                        ticked means they can&apos;t raise anything.
+                    </li>
+                    <li>
+                        Picking a client on a project fills in the
+                        project&apos;s country (and so its code).
+                    </li>
+                    <li>A client can&apos;t be deleted while a project uses it.</li>
+                </ul>
+            </>
+        ),
+    },
+    {
+        id: 'requests',
+        icon: ClipboardCheck,
+        accent: 'text-emerald-600',
+        title: 'Requests & approvals',
+        lead: 'One inbox for decisions: task reassignment proposals, approval of “specific” tasks and — for admins — new sign-ups.',
+        anchors: ['reassignments'],
+        body: (
+            <>
+                <p>
+                    Open <Link to="/requests" className="text-primary hover:underline">Requests</Link>; the
+                    sidebar badge counts what&apos;s waiting (pending
+                    reassignments plus task approvals). Old links to
+                    Reassignments land here too. Three tabs:
+                </p>
+                <ul className="ml-5 list-disc space-y-1">
+                    <li>
+                        <strong>Reassignments</strong> — anyone working on a
+                        task can propose moving it to someone else, with a
+                        reason. Admins and managers (or anyone with{' '}
+                        <em>Approve reassignment requests</em>) approve it —
+                        picking the new assignee, with an optional note; the
+                        change is immediate — or decline it with a note. The
+                        proposer sees the decision and can cancel while it&apos;s
+                        pending. Filter Pending / Approved / Declined /
+                        Cancelled / All.
+                    </li>
+                    <li>
+                        <strong>Task approvals</strong> — a <em>specific</em>{' '}
+                        task is a top-level task created with{' '}
+                        <em>Specific (needs approval)</em> (the{' '}
+                        <em>Create specific tasks</em> capability; admins and
+                        managers by default). It stays in To do until an
+                        approver (<em>Approve tasks</em>; admins and managers)
+                        approves it. Disapproving needs a reason, shown on the
+                        task as a rose badge; the creator, the assignee or an
+                        approver can then re-request approval. An approved task
+                        shows &ldquo;Approved by … on …&rdquo;, and specific
+                        tasks can&apos;t be duplicated.
+                    </li>
+                    <li>
+                        <strong>User approvals</strong> (admins) — pending,
+                        active and suspended sign-ups, with a shortcut to Users
+                        to approve them.
+                    </li>
+                </ul>
             </>
         ),
     },
@@ -1640,18 +2144,9 @@ const SECTIONS = [
         icon: SlidersHorizontal,
         accent: 'text-amber-600',
         title: 'Templates (admin)',
-        lead: 'Configure the option catalogues used everywhere in the app: project phases, priorities, types, countries, app OS / POS terminals, business units.',
-        body: (
-            <>
-                <p>
-                    Open <Link to="/templates" className="text-primary hover:underline">Templates</Link>
-                    {' '}to add, rename, reorder or deactivate the
-                    values that populate the dropdowns across the app.
-                    Anything you add here is available immediately in
-                    the relevant form — no restart required.
-                </p>
-            </>
-        ),
+        lead: 'Every option list in the app, section by section: phases, statuses, priorities, project types, products, entities, countries, business units, release OS / POS terminal types, ticket types (fields + help panel), requester groups and terminals.',
+        anchors: TEMPLATE_GUIDE_TOPICS.map((t) => t.id),
+        body: templatesGuideBody,
     },
     {
         id: 'notifications',
@@ -1706,7 +2201,7 @@ const SECTIONS = [
         icon: ShieldCheck,
         accent: 'text-rose-600',
         title: 'Roles & permissions',
-        lead: 'Four base roles, then granular capability checkboxes on top — admins decide who can do what at the verb level.',
+        lead: 'Five base roles (incl. Requester), then about 40 capability checkboxes on top — admins decide who can do what at the verb level.',
         body: (
             <>
                 <p>
@@ -1714,30 +2209,47 @@ const SECTIONS = [
                 </p>
                 <ul className="ml-5 list-disc space-y-1">
                     <li>
-                        <strong>Admin</strong> — everything.
+                        <strong>Admin</strong> — everything, except the
+                        Logs (the <em>View logs &amp; sign-in audit</em>{' '}
+                        capability must be ticked even for admins).
                     </li>
                     <li>
-                        <strong>Manager</strong> — full read +
-                        most-write across all projects.
+                        <strong>Manager</strong> — sees the projects they
+                        own or take part in; creates, edits and deletes
+                        tasks, approves reassignments and specific tasks,
+                        manages teams, sprints, applications / releases and
+                        change requests. Can't create or delete projects.
                     </li>
                     <li>
-                        <strong>App Moderator</strong> — phase
-                        transitions on Application releases + read
-                        elsewhere.
+                        <strong>App Moderator</strong> — a User who can
+                        also create and edit applications and releases,
+                        comment, declare release phases and add timeline
+                        checkpoints.
                     </li>
                     <li>
-                        <strong>User</strong> — read everything they
-                        participate in, edit what their role + per-
-                        user capabilities allow.
+                        <strong>User</strong> — works in the projects they
+                        participate in; by default also a ticket agent
+                        (open and answer tickets).
+                    </li>
+                    <li>
+                        <strong>Requester</strong> — help desk only: raises
+                        and follows tickets in the portal, never sees the
+                        workspace.
                     </li>
                 </ul>
                 <p>
-                    On top of the base role, admins can tick any
-                    subset of ~31 capabilities on a user&apos;s
-                    profile (<code>project:edit</code>,{' '}
-                    <code>task:reassign</code>,{' '}
-                    <code>app:checkpoint:add</code>,{' '}
-                    <code>time:export-all</code>, etc.). Changes take
+                    On top of the base role, admins can tick extra
+                    capabilities on a user&apos;s profile — about 40,
+                    grouped as Projects, Tasks, User accounts, Teams,
+                    Templates, Time tracking, Insights, Applications,
+                    Releases, Deployment timeline, Sprints, Change
+                    requests, Ticketing and Logs (e.g.{' '}
+                    <code>project:edit:any</code>,{' '}
+                    <code>task:reassign:approve</code>,{' '}
+                    <code>time:export</code>,{' '}
+                    <code>ticket:view:all</code>). Capabilities a role
+                    already includes show as &ldquo;via role&rdquo; and
+                    can&apos;t be removed per user. Changes take
                     effect within a few seconds — the server caches
                     the user row for 30 s and invalidates the entry on
                     every edit.
@@ -1763,7 +2275,10 @@ const SECTIONS = [
                     HMAC-signed download URLs with a 10-minute TTL
                     bound to the user id, explicit allow + block
                     lists on file uploads, WebSocket membership
-                    re-checks on every join.
+                    re-checks on every join. Requester (portal) accounts
+                    are deny-by-default: they can only call the portal&apos;s
+                    own endpoints, only see tickets they&apos;re allowed to,
+                    and only get realtime events about those tickets.
                 </p>
                 <p>
                     <strong>What you should do before flipping to
@@ -1774,7 +2289,7 @@ const SECTIONS = [
                     the JWT secrets, set up daily backups of the DB
                     and the <code>pm_uploads</code> volume. The full
                     checklist with file references is in{' '}
-                    <code>RELEASE_NOTES.md</code> at the repo root.
+                    <code>backend/RELEASE_NOTES.md</code>.
                 </p>
             </>
         ),
@@ -1788,7 +2303,7 @@ const SECTIONS = [
         body: (
             <>
                 <p>
-                    PM Tool uses the same icon vocabulary
+                    {APP_NAME} uses the same icon vocabulary
                     everywhere — once you learn it on one page,
                     you can read all the others at a glance.
                     The list below is grouped by intent (status,
@@ -1840,9 +2355,10 @@ const SECTIONS = [
                 <ul className="ml-5 list-disc space-y-1">
                     <li>
                         Search bar in the top bar accepts project /
-                        task / subtask codes (<code>P-25-…</code>,{' '}
+                        task / subtask codes (<code>P26-…</code>,{' '}
                         <code>T-…</code>, <code>ST-…</code>) and
-                        labels.
+                        labels — press <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+
+                        <kbd>K</kbd> to open it.
                     </li>
                     <li>
                         Sidebar group headers are clickable — click
@@ -1880,6 +2396,33 @@ const SECTIONS = [
         ),
     },
 ];
+
+// Plain text of a JSX tree (strings + children of every element), so the
+// search box also matches what's written inside a section, not just its
+// title and lead.
+function nodeText(node) {
+    if (node == null || typeof node === 'boolean') return '';
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) return node.map(nodeText).join(' ');
+    if (node.props) return nodeText(node.props.children);
+    return '';
+}
+
+const SECTION_TEXT = new Map(
+    SECTIONS.map((s) => [
+        s.id,
+        `${s.title} ${s.lead} ${nodeText(s.body)}`.replace(/\s+/g, ' ').toLowerCase(),
+    ]),
+);
+
+// Which section holds an anchor (#templates-phases → templates).
+function sectionForAnchor(id) {
+    if (!id) return null;
+    return (
+        SECTIONS.find((s) => s.id === id || (s.anchors || []).includes(id)) ||
+        null
+    );
+}
 
 // Persist collapsed sections in the browser so a returning user lands on
 // the same view. We store the collapsed IDs (not the open ones) so any
@@ -1922,11 +2465,13 @@ export default function Help() {
     const filtered = useMemo(() => {
         const q = query.trim().toLowerCase();
         if (!q) return SECTIONS;
-        return SECTIONS.filter((s) =>
-            [s.title, s.lead].some((t) =>
-                (t || '').toLowerCase().includes(q),
-            ),
-        );
+        const textOf = (s) => SECTION_TEXT.get(s.id) || '';
+        // Sections containing the exact phrase first; otherwise every
+        // word must appear somewhere in the section.
+        const phrase = SECTIONS.filter((s) => textOf(s).includes(q));
+        if (phrase.length) return phrase;
+        const words = q.split(/\s+/).filter(Boolean);
+        return SECTIONS.filter((s) => words.every((w) => textOf(s).includes(w)));
     }, [query]);
 
     // When the user is searching, force-expand every match so the body
@@ -1961,6 +2506,32 @@ export default function Help() {
         });
     }, []);
 
+    // Opening /help#<id> (e.g. the "How it works" links on Templates)
+    // expands the section that holds the anchor, then scrolls to it.
+    useEffect(() => {
+        const go = () => {
+            const id = decodeURIComponent(window.location.hash.slice(1));
+            const section = sectionForAnchor(id);
+            if (!section) return;
+            setQuery('');
+            setCollapsed((prev) => {
+                if (!prev.has(section.id)) return prev;
+                const next = new Set(prev);
+                next.delete(section.id);
+                return next;
+            });
+            // After the section has rendered its body.
+            setTimeout(() => {
+                document
+                    .getElementById(id)
+                    ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+            }, 60);
+        };
+        go();
+        window.addEventListener('hashchange', go);
+        return () => window.removeEventListener('hashchange', go);
+    }, []);
+
     const allCollapsed = collapsed.size >= SECTIONS.length;
 
     return (
@@ -1981,9 +2552,11 @@ export default function Help() {
                                         Help & guide
                                     </h1>
                                     <p className="max-w-2xl text-sm text-muted-foreground">
-                                        A short tour of every module
-                                        in PM Tool, with a "how to
-                                        use it" paragraph for each.
+                                        A tour of every module in{' '}
+                                        {APP_NAME}, with a "how to use
+                                        it" paragraph for each — and
+                                        every Templates option in
+                                        detail.
                                         Bookmark this page or come
                                         back any time from the
                                         sidebar.
@@ -1995,7 +2568,7 @@ export default function Help() {
                                 <Input
                                     value={query}
                                     onChange={(e) => setQuery(e.target.value)}
-                                    placeholder="Search the help topics..."
+                                    placeholder="Search the help (e.g. hide complete)…"
                                     className="pl-8"
                                 />
                             </div>

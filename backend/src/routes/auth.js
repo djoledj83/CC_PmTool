@@ -17,6 +17,7 @@ const { createResetTokenForUser, buildResetUrl } = require('../lib/resetTokens')
 const { notify, broadcastPendingUserCount } = require('../lib/notify');
 const { sendTemplate, appLink, APP_NAME } = require('../lib/mailer');
 const { logActivityEvent } = require('../lib/activityLog');
+const { recordAuthEvent } = require('../lib/authAudit');
 const { effectiveCapabilities } = require('../lib/permissions');
 
 const router = express.Router();
@@ -150,8 +151,9 @@ async function findUserByEmail(email, { include } = {}) {
 }
 
 // Public sign-up is open: anyone can create an account, but the first user
-// auto-bootstraps as ADMIN/ACTIVE; everyone after that lands as USER/PENDING
-// and must be approved by an administrator before they can log in.
+// auto-bootstraps as ADMIN/ACTIVE; everyone after that lands as a PENDING
+// customer (external requester, no organisation) and must be approved —
+// with the right account type — before they can log in.
 router.post('/register', async (req, res, next) => {
     try {
         const { password, name } = registerSchema.parse(req.body);
@@ -164,12 +166,18 @@ router.post('/register', async (req, res, next) => {
         const isFirst = userCount === 0;
 
         const passwordHash = await bcrypt.hash(password, 10);
+        // The very first account bootstraps the workspace as its admin.
+        // Everyone else who signs up is a CUSTOMER until an approver says
+        // otherwise: an external requester with no organisation yet —
+        // the lowest access there is (their own requests only). Approving
+        // picks the organisation, or makes them an employee / staff user.
         const user = await prisma.user.create({
             data: {
                 email,
                 password: passwordHash,
                 name,
-                role: isFirst ? 'ADMIN' : 'USER',
+                role: isFirst ? 'ADMIN' : 'REQUESTER',
+                external: !isFirst,
                 status: isFirst ? 'ACTIVE' : 'PENDING',
                 approvedAt: isFirst ? new Date() : null,
             },
@@ -210,7 +218,7 @@ router.post('/register', async (req, res, next) => {
             actorId: user.id,
             type: 'USER_PENDING_APPROVAL',
             title: 'New user awaiting approval',
-            body: `${user.name} (${user.email}) just registered.`,
+            body: `${user.name} (${user.email}) just registered — choose their account type when approving.`,
             link: '/users?status=pending',
         });
         await broadcastPendingUserCount();
@@ -246,18 +254,49 @@ router.post('/login', async (req, res, next) => {
         const email = normalizeEmailInput(req.body.email);
 
         const user = await findUserByEmail(email, { include: authUserInclude });
-        if (!user) throw httpError(401, 'Invalid email or password');
+        if (!user) {
+            await recordAuthEvent({
+                req,
+                email,
+                type: 'LOGIN_FAILED',
+                reason: 'unknown_email',
+            });
+            throw httpError(401, 'Invalid email or password');
+        }
 
         const ok = await bcrypt.compare(password, user.password);
-        if (!ok) throw httpError(401, 'Invalid email or password');
+        if (!ok) {
+            await recordAuthEvent({
+                req,
+                email,
+                userId: user.id,
+                type: 'LOGIN_FAILED',
+                reason: 'wrong_password',
+            });
+            throw httpError(401, 'Invalid email or password');
+        }
 
         if (user.status === 'PENDING') {
+            await recordAuthEvent({
+                req,
+                email,
+                userId: user.id,
+                type: 'LOGIN_BLOCKED',
+                reason: 'pending',
+            });
             throw httpError(
                 403,
                 'Your account is awaiting administrator approval. You will be notified once it is approved.',
             );
         }
         if (user.status === 'SUSPENDED') {
+            await recordAuthEvent({
+                req,
+                email,
+                userId: user.id,
+                type: 'LOGIN_BLOCKED',
+                reason: 'suspended',
+            });
             throw httpError(
                 403,
                 'Your account has been suspended. Please contact an administrator.',
@@ -285,6 +324,13 @@ router.post('/login', async (req, res, next) => {
                 targetUserName: user.name,
                 targetUserEmail: user.email,
             },
+        });
+        await recordAuthEvent({
+            req,
+            email: user.email,
+            userId: user.id,
+            type: 'LOGIN_SUCCESS',
+            reason: 'ok',
         });
 
         const { accessToken, refreshToken } = issueTokens(res, user);
@@ -468,13 +514,20 @@ router.post('/reset-password', async (req, res, next) => {
         await prisma.$transaction([
             prisma.user.update({
                 where: { id: record.userId },
-                data: { password: passwordHash },
+                // Bumping tokenVersion signs the account out EVERYWHERE —
+                // a reset usually means the old password (and any session
+                // opened with it) may be compromised.
+                data: {
+                    password: passwordHash,
+                    tokenVersion: { increment: 1 },
+                },
             }),
             prisma.passwordResetToken.update({
                 where: { id: record.id },
                 data: { used: true },
             }),
         ]);
+        invalidateUserCache(record.userId);
 
         const resetUser = await prisma.user.findUnique({
             where: { id: record.userId },
@@ -512,10 +565,18 @@ router.post('/change-password', requireAuth, async (req, res, next) => {
         if (!ok) throw httpError(400, 'Current password is incorrect');
 
         const passwordHash = await bcrypt.hash(newPassword, 10);
-        await prisma.user.update({
+        // Bump tokenVersion → every OTHER session (other browsers/devices)
+        // is signed out immediately. We then re-issue tokens for THIS
+        // session with the new version so the user isn't kicked out of
+        // the tab they just changed their password in.
+        const updated = await prisma.user.update({
             where: { id: user.id },
-            data: { password: passwordHash },
+            data: {
+                password: passwordHash,
+                tokenVersion: { increment: 1 },
+            },
         });
+        invalidateUserCache(user.id);
 
         await logActivityEvent({
             type: 'USER_PASSWORD_CHANGED',
@@ -528,7 +589,12 @@ router.post('/change-password', requireAuth, async (req, res, next) => {
             },
         });
 
-        res.json({ ok: true });
+        const { accessToken, refreshToken } = issueTokens(res, updated);
+        res.json({
+            ok: true,
+            accessToken,
+            ...(isMobileClient(req) ? { refreshToken } : {}),
+        });
     } catch (err) {
         next(err);
     }

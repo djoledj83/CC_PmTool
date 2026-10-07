@@ -249,6 +249,10 @@ function directoryUser(u) {
             ? { id: u.businessUnit.id, name: u.businessUnit.name }
             : null,
         status: u.status || null,
+        // Customers (external requesters) and their organisation, so
+        // pickers can leave out people who couldn't see a given ticket.
+        external: Boolean(u.external),
+        clientId: u.clientId || null,
     };
 }
 
@@ -341,6 +345,8 @@ router.get('/', async (req, res, next) => {
                 role: true,
                 position: true,
                 status: true,
+                external: true,
+                clientId: true,
                 businessUnit: { select: { id: true, name: true } },
             },
         });
@@ -477,6 +483,38 @@ router.patch('/:id', async (req, res, next) => {
         const target = await prisma.user.findUnique({ where: { id: req.params.id } });
         if (!target) throw httpError(404, 'User not found');
 
+        // Self-service edits (no admin / user:edit:any) can't touch how an
+        // account is scoped: its organisation, requester type, allowed
+        // ticket types and business unit are admin-managed — otherwise a
+        // requester could widen their own access (e.g. turn "external"
+        // off and see every organisation's tickets). Requesters also
+        // can't change their own e-mail (it's their login) or org chart.
+        const privileged =
+            isAdmin(req) || hasCapability(req, CAPABILITIES.USER_EDIT_ANY);
+        if (!privileged) {
+            for (const k of [
+                'clientId',
+                'external',
+                'ticketTypeIds',
+                'businessUnitId',
+                'employeeCode',
+                'timeLogMandatory',
+                'capabilities',
+            ]) {
+                delete data[k];
+            }
+            if (target.role === 'REQUESTER') {
+                if (data.email !== undefined && data.email !== target.email) {
+                    throw httpError(
+                        403,
+                        'Ask an administrator to change your e-mail address.',
+                    );
+                }
+                delete data.email;
+                delete data.teamLeaderId;
+            }
+        }
+
         // Changing roles requires admin OR the explicit
         // `user:role:manage` capability override. Capabilities (the
         // `data.capabilities` field) remain admin-only — delegating
@@ -559,14 +597,29 @@ router.patch('/:id', async (req, res, next) => {
                 create: ids.map((requestTypeId) => ({ requestTypeId })),
             };
         }
-        // An external requester must end up with an organisation.
+        // An active external requester must have an organisation (pending
+        // sign-ups get theirs when approved, so other edits still save).
+        // Staff never belong to a customer organisation.
+        const canChangeRole =
+            isAdmin(req) || hasCapability(req, CAPABILITIES.USER_ROLE_MANAGE);
+        const finalRole =
+            data.role !== undefined && canChangeRole ? data.role : target.role;
+        if (finalRole !== 'REQUESTER' && (target.external || target.clientId || data.external || data.clientId)) {
+            updateData.external = false;
+            updateData.clientId = null;
+        }
         const finalExternal =
-            data.external !== undefined ? data.external : target.external;
+            finalRole === 'REQUESTER' &&
+            (data.external !== undefined ? data.external : target.external);
         const finalClientId =
             data.clientId !== undefined
                 ? data.clientId || null
                 : target.clientId;
-        if (finalExternal && !finalClientId) {
+        if (
+            target.status !== 'PENDING' &&
+            finalExternal &&
+            !finalClientId
+        ) {
             throw httpError(
                 400,
                 'External requesters must belong to an organization.',
@@ -588,6 +641,9 @@ router.patch('/:id', async (req, res, next) => {
         // used to lock out the rightful owner.
         if (data.password && isAdmin(req) && !isSelf(req, req.params.id)) {
             updateData.password = await bcrypt.hash(data.password, 10);
+            // Admin-set password → sign that user out everywhere. The
+            // invalidateUserCache() after the update makes it immediate.
+            updateData.tokenVersion = { increment: 1 };
         } else if (data.password) {
             throw httpError(
                 400,
@@ -616,6 +672,15 @@ router.patch('/:id', async (req, res, next) => {
         // Bust the auth cache so the freshly-saved role/capabilities
         // are visible to the next request, not 30 seconds later.
         invalidateUserCache(user.id);
+        // Who they are to the realtime layer changed → reconnect them so
+        // they land in the right audience rooms.
+        if (
+            user.role !== target.role ||
+            Boolean(user.external) !== Boolean(target.external) ||
+            (user.clientId || null) !== (target.clientId || null)
+        ) {
+            realtime.disconnectUser(user.id);
+        }
 
         // Audit-log every change. Role / password get their own
         // dedicated event types so the feed reads cleanly. Everything
@@ -721,6 +786,8 @@ router.delete('/:id', requireUserEditAny, async (req, res, next) => {
 
         if (user.avatarUrl) removeFileSafe(user.avatarUrl);
         await prisma.user.delete({ where: { id: req.params.id } });
+        invalidateUserCache(user.id);
+        realtime.disconnectUser(user.id);
         if (user.status === 'PENDING') await broadcastPendingUserCount();
 
         await logActivityEvent({
@@ -841,8 +908,22 @@ router.post('/:id/reset-link', requireUserEditAny, async (req, res, next) => {
 });
 
 // Approve a PENDING (or re-activate a SUSPENDED) account so they can log in.
+// Optional account type chosen in the Approve dialog. Self-registered
+// accounts arrive as customers (external requesters) with no
+// organisation; the approver confirms or changes that here.
+const approveSchema = z
+    .object({
+        role: z.enum(ROLES).optional(),
+        external: z.boolean().optional(),
+        clientId: z.string().min(1).optional().nullable(),
+        // Internal requesters: which ticket types they may raise.
+        ticketTypeIds: z.array(z.string()).max(200).optional(),
+    })
+    .optional();
+
 router.post('/:id/approve', requireUserApprove, async (req, res, next) => {
     try {
+        const body = approveSchema.parse(req.body || undefined) || {};
         const target = await prisma.user.findUnique({ where: { id: req.params.id } });
         if (!target) throw httpError(404, 'User not found');
 
@@ -854,15 +935,87 @@ router.post('/:id/approve', requireUserApprove, async (req, res, next) => {
             return res.json({ user: publicUser(fresh), changed: false });
         }
 
+        // Account type (sign-ups, or when the approver sends one; a plain
+        // reactivation keeps the account as it was). A role change needs
+        // the same right as on PATCH.
+        const accountData = {};
+        // A sign-up must be given an account type explicitly — never
+        // activated as whatever role it happens to carry.
+        if (target.status === 'PENDING' && !body.role) {
+            throw httpError(
+                400,
+                'Choose the account type (customer, employee requester or staff role) to approve.',
+            );
+        }
+        const setsType =
+            target.status === 'PENDING' || Object.keys(body).length > 0;
+        if (setsType && body.role !== undefined && body.role !== target.role) {
+            if (!isAdmin(req) && !hasCapability(req, CAPABILITIES.USER_ROLE_MANAGE)) {
+                throw httpError(403, 'Only admins can change roles');
+            }
+            accountData.role = body.role;
+        }
+        const role = accountData.role || target.role;
+        if (!setsType) {
+            // keep role / organisation untouched
+        } else if (role === 'REQUESTER') {
+            const external =
+                body.external !== undefined ? body.external : Boolean(target.external);
+            const clientId =
+                body.clientId !== undefined ? body.clientId || null : target.clientId || null;
+            if (external) {
+                if (!clientId) {
+                    throw httpError(
+                        400,
+                        'Pick the organisation this customer belongs to.',
+                    );
+                }
+                const client = await prisma.client.findUnique({
+                    where: { id: clientId },
+                    select: { id: true },
+                });
+                if (!client) throw httpError(400, 'Selected organisation not found.');
+            }
+            accountData.external = external;
+            accountData.clientId = external ? clientId : null;
+            if (!external && body.ticketTypeIds !== undefined) {
+                const ids = Array.from(new Set(body.ticketTypeIds));
+                accountData.ticketTypes = {
+                    deleteMany: {},
+                    create: ids.map((requestTypeId) => ({ requestTypeId })),
+                };
+            }
+        } else {
+            // Staff don't belong to a customer organisation.
+            accountData.external = false;
+            accountData.clientId = null;
+        }
+
         const wasPending = target.status === 'PENDING';
         const user = await prisma.user.update({
             where: { id: req.params.id },
             data: {
+                ...accountData,
                 status: 'ACTIVE',
                 approvedAt: target.approvedAt || new Date(),
             },
             include: userInclude,
         });
+        invalidateUserCache(user.id);
+        if (user.role !== target.role) {
+            await logActivityEvent({
+                type: 'USER_ROLE_CHANGED',
+                actorId: req.user.id,
+                message: user.name,
+                fromValue: ROLE_LABELS[target.role] || target.role,
+                toValue: ROLE_LABELS[user.role] || user.role,
+                meta: {
+                    targetUserId: user.id,
+                    targetUserName: user.name,
+                    targetUserEmail: user.email,
+                },
+            });
+        }
 
         await notify({
             recipientIds: [user.id],
@@ -940,6 +1093,9 @@ router.post('/:id/suspend', requireUserEditAny, async (req, res, next) => {
             data: { status: 'SUSPENDED' },
             include: userInclude,
         });
+        // Locked out now — not when the 30 s auth cache runs out.
+        invalidateUserCache(user.id);
+        realtime.disconnectUser(user.id);
 
         await logActivityEvent({
             type: 'USER_SUSPENDED',

@@ -1,8 +1,19 @@
 // Admin screen to manage ticket request types — the cards requesters see
-// on the portal. Each type maps to a project (where its tickets land).
+// on the portal. Each type maps to a project (where its tickets land) and
+// carries everything its raise form needs: custom fields and the help
+// panel next to the form (tips, related resources, on-call contact).
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Plus, Pencil, Trash2, Users, Check } from 'lucide-react';
+import {
+    Loader2,
+    Plus,
+    Pencil,
+    Trash2,
+    Users,
+    Check,
+    LifeBuoy,
+    SlidersHorizontal,
+} from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -23,6 +34,7 @@ import { Label } from '@/components/ui/label';
 import {
     Dialog,
     DialogContent,
+    DialogDescription,
     DialogFooter,
     DialogHeader,
     DialogTitle,
@@ -35,6 +47,14 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { TicketFieldsManager } from '@/components/TicketFieldsManager';
+import { TabBar } from '@/components/TicketDetailParts';
+import {
+    TicketHelpSettingsEditor,
+    helpFormFromType,
+    helpPayload,
+    helpProblems,
+    helpSummary,
+} from '@/components/TicketHelpSettingsEditor';
 
 const PRIORITIES = ['LOW', 'NORMAL', 'HIGH', 'URGENT'];
 const titleCase = (s) => (s ? s.charAt(0) + s.slice(1).toLowerCase() : s);
@@ -116,7 +136,9 @@ export function TicketTypesManager() {
                     something to pick.
                 </p>
             ) : (
-                <div className="space-y-2">
+                /* Bordered, divided list rows — same row treatment as the
+                   inline-edit sections on the Templates page. */
+                <div className="divide-y rounded-lg border">
                     {types.map((rt) => {
                         const Icon = getTicketTypeIcon(rt.icon);
                         const agents = rt.agents || [];
@@ -124,13 +146,13 @@ export function TicketTypesManager() {
                         <div
                             key={rt.id}
                             className={cn(
-                                'flex items-start gap-3 rounded-lg border bg-background p-3',
+                                'flex items-center gap-3 px-3 py-2',
                                 !rt.active && 'opacity-60',
                             )}
                         >
                             <span
                                 className={cn(
-                                    'mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md',
+                                    'flex h-8 w-8 shrink-0 items-center justify-center rounded-md',
                                     getTicketTypeChipClasses(rt.color),
                                 )}
                             >
@@ -166,6 +188,13 @@ export function TicketTypesManager() {
                                                       ? 'agent'
                                                       : 'agents'
                                               }`}
+                                    </span>
+                                    <span
+                                        className="inline-flex items-center gap-1"
+                                        data-help-summary=""
+                                    >
+                                        <LifeBuoy className="h-3 w-3" />
+                                        Help: {helpSummary(rt.help)}
                                     </span>
                                 </div>
                             </div>
@@ -209,9 +238,19 @@ export function TicketTypesManager() {
     );
 }
 
+// The type dialog has two tabs: Details (name, look, who handles it, with
+// the custom fields of its raise form on the right) and Help panel (tips,
+// related resources, on-call contact next to the form). Fixed height, so
+// switching tabs doesn't make the dialog jump.
+const DIALOG_TABS = [
+    { id: 'details', label: 'Details', icon: SlidersHorizontal },
+    { id: 'help', label: 'Help panel', icon: LifeBuoy },
+];
+
 function TypeDialog({ value, onOpenChange, onSaved }) {
     const open = !!value;
     const editingId = value?.id || null;
+    const [tab, setTab] = useState('details');
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
     const [defaultPriority, setDefaultPriority] = useState('NONE');
@@ -219,8 +258,14 @@ function TypeDialog({ value, onOpenChange, onSaved }) {
     const [icon, setIcon] = useState('life-buoy');
     const [color, setColor] = useState(null);
     const [agentIds, setAgentIds] = useState([]);
+    const [help, setHelp] = useState(() => helpFormFromType(null));
     const [users, setUsers] = useState([]);
     const [saving, setSaving] = useState(false);
+
+    // Each time the dialog opens it starts on Details.
+    useEffect(() => {
+        if (open) setTab('details');
+    }, [open]);
 
     useEffect(() => {
         if (!open) return;
@@ -231,6 +276,7 @@ function TypeDialog({ value, onOpenChange, onSaved }) {
         setIcon(value.icon || 'life-buoy');
         setColor(value.color || null);
         setAgentIds(value.agentIds || []);
+        setHelp(helpFormFromType(value));
     }, [open, value]);
 
     // Candidate agents = active, non-requester users.
@@ -252,7 +298,15 @@ function TypeDialog({ value, onOpenChange, onSaved }) {
         );
 
     const save = async () => {
-        if (!name.trim()) return toast.error('Enter a name.');
+        if (!name.trim()) {
+            setTab('details');
+            return toast.error('Enter a name.');
+        }
+        const problems = helpProblems(help);
+        if (problems.length) {
+            setTab('help');
+            return toast.error(`Help panel: ${problems[0]}`);
+        }
         const payload = {
             name: name.trim(),
             description: description.trim() || null,
@@ -261,6 +315,7 @@ function TypeDialog({ value, onOpenChange, onSaved }) {
             icon,
             color,
             agentIds,
+            ...helpPayload(help),
         };
         try {
             setSaving(true);
@@ -273,8 +328,11 @@ function TypeDialog({ value, onOpenChange, onSaved }) {
             toast.success(
                 editingId
                     ? 'Saved.'
-                    : 'Type created — add custom fields below, then close.',
+                    : 'Type created — add its custom fields on the right, then close.',
             );
+            // A new type can get its custom fields now that it has an id
+            // (they're on the Details tab).
+            if (!editingId) setTab('details');
             onSaved?.(data.requestType, { created: !editingId });
         } catch (err) {
             toast.error(err.response?.data?.error || 'Could not save.');
@@ -285,212 +343,230 @@ function TypeDialog({ value, onOpenChange, onSaved }) {
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="max-h-[88vh] w-[90vw] max-w-[90vw] overflow-y-auto sm:w-[90vw] sm:max-w-[90vw]">
-                <DialogHeader>
+            <DialogContent className="flex h-[88vh] w-[90vw] max-w-[90vw] flex-col gap-0 overflow-hidden p-0 sm:w-[90vw] sm:max-w-[90vw]">
+                <DialogHeader className="shrink-0 px-6 pb-0 pt-5">
                     <DialogTitle>
                         {editingId ? 'Edit request type' : 'New request type'}
                     </DialogTitle>
+                    <DialogDescription>
+                        Details, the fields requesters fill in, and the help
+                        shown next to this type’s raise form.
+                    </DialogDescription>
                 </DialogHeader>
-                <div className="grid items-start gap-6 lg:grid-cols-2">
-                    <div className="space-y-3">
-                    <div className="space-y-1.5">
-                        <Label className="text-xs">Name</Label>
-                        <Input
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            placeholder="e.g. Problem on page"
-                        />
-                    </div>
-                    <div className="space-y-1.5">
-                        <div className="flex items-center justify-between">
-                            <Label className="text-xs">Description</Label>
-                            <span className="text-[10px] text-muted-foreground">
-                                {description.length}/255
-                            </span>
-                        </div>
-                        <Textarea
-                            value={description}
-                            onChange={(e) =>
-                                setDescription(e.target.value.slice(0, 255))
-                            }
-                            maxLength={255}
-                            placeholder="Shown under the card on the portal"
-                            rows={4}
-                        />
-                    </div>
-                    <div className="space-y-1.5">
-                        <Label className="text-xs">Icon</Label>
-                        <div className="grid grid-cols-9 gap-1.5">
-                            {TICKET_TYPE_ICON_OPTIONS.map((opt) => {
-                                const OptIcon = opt.Icon;
-                                const sel = icon === opt.value;
-                                return (
-                                    <button
-                                        key={opt.value}
-                                        type="button"
-                                        title={opt.label}
-                                        onClick={() => setIcon(opt.value)}
-                                        className={cn(
-                                            'flex h-9 items-center justify-center rounded-md border transition-colors',
-                                            sel
-                                                ? 'border-primary bg-primary/10 text-primary ring-1 ring-primary/40'
-                                                : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                                        )}
-                                    >
-                                        <OptIcon className="h-4 w-4" />
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    </div>
-                    <div className="space-y-1.5">
-                        <Label className="text-xs">Colour</Label>
-                        <div className="flex flex-wrap gap-1.5">
-                            {/* "Default" (no colour) first, then the palette. */}
-                            <button
-                                type="button"
-                                title="Default"
-                                onClick={() => setColor(null)}
-                                className={cn(
-                                    'flex h-7 w-7 items-center justify-center rounded-full border',
-                                    !color
-                                        ? 'ring-2 ring-primary ring-offset-1'
-                                        : 'hover:opacity-80',
-                                )}
-                            >
-                                <span className="h-4 w-4 rounded-full bg-primary/20" />
-                            </button>
-                            {TICKET_TYPE_COLORS.map((c) => (
-                                <button
-                                    key={c.value}
-                                    type="button"
-                                    title={c.label}
-                                    onClick={() => setColor(c.value)}
-                                    className={cn(
-                                        'flex h-7 w-7 items-center justify-center rounded-full',
-                                        color === c.value
-                                            ? 'ring-2 ring-primary ring-offset-1'
-                                            : 'hover:opacity-80',
-                                    )}
-                                >
-                                    <span
-                                        className={cn(
-                                            'h-4 w-4 rounded-full',
-                                            getTicketTypeDotClass(c.value),
-                                        )}
+                <div className="shrink-0 px-6 pt-3">
+                    <TabBar tabs={DIALOG_TABS} active={tab} onChange={setTab} />
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+                    {tab === 'details' && (
+                        <div className="grid items-start gap-6 lg:grid-cols-2">
+                            <div className="space-y-3">
+                                <div className="space-y-1.5">
+                                    <Label className="text-xs">Name</Label>
+                                    <Input
+                                        value={name}
+                                        onChange={(e) => setName(e.target.value)}
+                                        placeholder="e.g. Problem on page"
                                     />
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-1.5">
-                            <Label className="text-xs">Default priority</Label>
-                            <Select
-                                value={defaultPriority}
-                                onValueChange={setDefaultPriority}
-                            >
-                                <SelectTrigger>
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="NONE">None</SelectItem>
-                                    {PRIORITIES.map((p) => (
-                                        <SelectItem key={p} value={p}>
-                                            {titleCase(p)}
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
-                        </div>
-                        <div className="space-y-1.5">
-                            <Label className="text-xs">Status</Label>
-                            <Select
-                                value={active ? 'active' : 'inactive'}
-                                onValueChange={(v) =>
-                                    setActive(v === 'active')
-                                }
-                            >
-                                <SelectTrigger>
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="active">
-                                        Active
-                                    </SelectItem>
-                                    <SelectItem value="inactive">
-                                        Inactive
-                                    </SelectItem>
-                                </SelectContent>
-                            </Select>
-                        </div>
-                    </div>
-                    <div className="space-y-1.5">
-                        <Label className="text-xs">Who can see these tickets</Label>
-                        <p className="text-[11px] text-muted-foreground">
-                            Leave empty so every agent sees this type. Pick
-                            users to make it a private queue — only they (and
-                            admins) will see tickets of this type. Requesters
-                            can&apos;t be added.
-                        </p>
-                        <div className="max-h-44 space-y-0.5 overflow-y-auto rounded-md border p-1">
-                            {users.length === 0 ? (
-                                <p className="px-2 py-2 text-xs text-muted-foreground">
-                                    No agents available.
-                                </p>
-                            ) : (
-                                users.map((u) => {
-                                    const on = agentIds.includes(u.id);
-                                    return (
+                                </div>
+                                <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between">
+                                        <Label className="text-xs">Description</Label>
+                                        <span className="text-[10px] text-muted-foreground">
+                                            {description.length}/255
+                                        </span>
+                                    </div>
+                                    <Textarea
+                                        value={description}
+                                        onChange={(e) =>
+                                            setDescription(e.target.value.slice(0, 255))
+                                        }
+                                        maxLength={255}
+                                        placeholder="Shown under the card on the portal"
+                                        rows={4}
+                                    />
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label className="text-xs">Icon</Label>
+                                    <div className="grid grid-cols-9 gap-1.5">
+                                        {TICKET_TYPE_ICON_OPTIONS.map((opt) => {
+                                            const OptIcon = opt.Icon;
+                                            const sel = icon === opt.value;
+                                            return (
+                                                <button
+                                                    key={opt.value}
+                                                    type="button"
+                                                    title={opt.label}
+                                                    onClick={() => setIcon(opt.value)}
+                                                    className={cn(
+                                                        'flex h-9 items-center justify-center rounded-md border transition-colors',
+                                                        sel
+                                                            ? 'border-primary bg-primary/10 text-primary ring-1 ring-primary/40'
+                                                            : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                                                    )}
+                                                >
+                                                    <OptIcon className="h-4 w-4" />
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label className="text-xs">Colour</Label>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {/* "Default" (no colour) first, then the palette. */}
                                         <button
-                                            key={u.id}
                                             type="button"
-                                            onClick={() => toggleAgent(u.id)}
-                                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                                            title="Default"
+                                            onClick={() => setColor(null)}
+                                            className={cn(
+                                                'flex h-7 w-7 items-center justify-center rounded-full border',
+                                                !color
+                                                    ? 'ring-2 ring-primary ring-offset-1'
+                                                    : 'hover:opacity-80',
+                                            )}
                                         >
-                                            <span
+                                            <span className="h-4 w-4 rounded-full bg-primary/20" />
+                                        </button>
+                                        {TICKET_TYPE_COLORS.map((c) => (
+                                            <button
+                                                key={c.value}
+                                                type="button"
+                                                title={c.label}
+                                                onClick={() => setColor(c.value)}
                                                 className={cn(
-                                                    'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
-                                                    on
-                                                        ? 'border-primary bg-primary text-primary-foreground'
-                                                        : 'border-input',
+                                                    'flex h-7 w-7 items-center justify-center rounded-full',
+                                                    color === c.value
+                                                        ? 'ring-2 ring-primary ring-offset-1'
+                                                        : 'hover:opacity-80',
                                                 )}
                                             >
-                                                {on && (
-                                                    <Check className="h-3 w-3" />
-                                                )}
-                                            </span>
-                                            <span className="truncate">
-                                                {u.name || u.email}
-                                            </span>
-                                        </button>
-                                    );
-                                })
-                            )}
+                                                <span
+                                                    className={cn(
+                                                        'h-4 w-4 rounded-full',
+                                                        getTicketTypeDotClass(c.value),
+                                                    )}
+                                                />
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="space-y-1.5">
+                                        <Label className="text-xs">Default priority</Label>
+                                        <Select
+                                            value={defaultPriority}
+                                            onValueChange={setDefaultPriority}
+                                        >
+                                            <SelectTrigger>
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="NONE">None</SelectItem>
+                                                {PRIORITIES.map((p) => (
+                                                    <SelectItem key={p} value={p}>
+                                                        {titleCase(p)}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <Label className="text-xs">Status</Label>
+                                        <Select
+                                            value={active ? 'active' : 'inactive'}
+                                            onValueChange={(v) =>
+                                                setActive(v === 'active')
+                                            }
+                                        >
+                                            <SelectTrigger>
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="active">
+                                                    Active
+                                                </SelectItem>
+                                                <SelectItem value="inactive">
+                                                    Inactive
+                                                </SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label className="text-xs">Who can see these tickets</Label>
+                                    <p className="text-[11px] text-muted-foreground">
+                                        Leave empty so every agent sees this type. Pick
+                                        users to make it a private queue — only they (and
+                                        admins) will see tickets of this type. Requesters
+                                        can&apos;t be added.
+                                    </p>
+                                    <div className="max-h-44 space-y-0.5 overflow-y-auto rounded-md border p-1">
+                                        {users.length === 0 ? (
+                                            <p className="px-2 py-2 text-xs text-muted-foreground">
+                                                No agents available.
+                                            </p>
+                                        ) : (
+                                            users.map((u) => {
+                                                const on = agentIds.includes(u.id);
+                                                return (
+                                                    <button
+                                                        key={u.id}
+                                                        type="button"
+                                                        onClick={() => toggleAgent(u.id)}
+                                                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                                                    >
+                                                        <span
+                                                            className={cn(
+                                                                'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+                                                                on
+                                                                    ? 'border-primary bg-primary text-primary-foreground'
+                                                                    : 'border-input',
+                                                            )}
+                                                        >
+                                                            {on && (
+                                                                <Check className="h-3 w-3" />
+                                                            )}
+                                                        </span>
+                                                        <span className="truncate">
+                                                            {u.name || u.email}
+                                                        </span>
+                                                    </button>
+                                                );
+                                            })
+                                        )}
+                                    </div>
+                                    {agentIds.length > 0 && (
+                                        <p className="text-[11px] text-muted-foreground">
+                                            Restricted to {agentIds.length}{' '}
+                                            {agentIds.length === 1 ? 'agent' : 'agents'}.
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                            {/* Right column: the custom fields requesters
+                                fill in on this type's raise form. */}
+                            <div className="space-y-1.5 lg:border-l lg:pl-6">
+                                <Label className="text-xs">Custom fields</Label>
+                                {editingId ? (
+                                    <TicketFieldsManager requestTypeId={editingId} />
+                                ) : (
+                                    <p className="text-[11px] text-muted-foreground">
+                                        Save the type first, then add the fields
+                                        requesters fill in when raising this type.
+                                    </p>
+                                )}
+                            </div>
                         </div>
-                        {agentIds.length > 0 && (
-                            <p className="text-[11px] text-muted-foreground">
-                                Restricted to {agentIds.length}{' '}
-                                {agentIds.length === 1 ? 'agent' : 'agents'}.
-                            </p>
-                        )}
-                    </div>
-                    </div>
-
-                    {/* Per-type custom fields — right column. */}
-                    <div className="space-y-1.5 lg:border-l lg:pl-6">
-                        <Label className="text-xs">Custom fields</Label>
-                        {editingId ? (
-                            <TicketFieldsManager requestTypeId={editingId} />
-                        ) : (
-                            <p className="text-[11px] text-muted-foreground">
-                                Save the type first, then reopen it to add the
-                                fields requesters fill in when raising this type.
-                            </p>
-                        )}
-                    </div>
+                    )}
+                    {tab === 'help' && (
+                        <TicketHelpSettingsEditor
+                            value={help}
+                            onChange={setHelp}
+                            disabled={saving}
+                        />
+                    )}
                 </div>
-                <DialogFooter>
+                <DialogFooter className="shrink-0 border-t px-6 py-3">
                     <Button
                         variant="outline"
                         onClick={() => onOpenChange(false)}

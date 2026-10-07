@@ -84,18 +84,53 @@ const PRIORITY_META = {
         label: 'Low',
         className:
             'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-500/10 dark:text-slate-300',
+        // Solid fill for the vertical priority spine on to-do cards.
+        spine: 'bg-slate-400 dark:bg-slate-500',
     },
     MEDIUM: {
         label: 'Medium',
         className:
             'bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300',
+        spine: 'bg-sky-500',
     },
     HIGH: {
         label: 'High',
         className:
             'bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-500/10 dark:text-rose-300',
+        spine: 'bg-rose-500',
     },
 };
+
+// Left-edge "spine" carrying the priority — the same device the project
+// cards use for status: a solid colour band with the label set vertically,
+// so priority reads at a glance down the whole list.
+function PrioritySpine({ priority, done }) {
+    const meta = PRIORITY_META[priority];
+    return (
+        <div
+            className={cn(
+                'flex w-7 shrink-0 flex-col items-center justify-center gap-1 self-stretch',
+                meta?.spine || 'bg-muted-foreground/25',
+                done && 'opacity-50',
+            )}
+            title={meta ? `Priority: ${meta.label}` : 'No priority'}
+        >
+            <Flag className="h-2.5 w-2.5 text-white/90" aria-hidden />
+            <span className="rotate-180 whitespace-nowrap px-0.5 text-[9px] font-semibold uppercase tracking-wider text-white [writing-mode:vertical-rl]">
+                {meta?.label || '—'}
+            </span>
+        </div>
+    );
+}
+
+// Small uppercase caption in front of each card field ("Task:", "Project:").
+function FieldLabel({ children }) {
+    return (
+        <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            {children}
+        </span>
+    );
+}
 
 const TODO_SORT_KEY = 'pm-todo-sort';
 
@@ -1398,9 +1433,12 @@ function StatCard({ label, value, sub, tone }) {
 function Section({ title, subtitle, count, icon, emptyText, children }) {
     const items = Array.isArray(children) ? children : [children];
     const hasChildren = items.filter(Boolean).length > 0;
+    // Each task is its own rounded card (see PersonalRow / TaskRow), so the
+    // section is just a light label above a stack — no outer box, no
+    // divider lines. The priority spine then follows each card's corner.
     return (
-        <section className="overflow-hidden rounded-lg border bg-card shadow-sm">
-            <header className="flex items-center justify-between gap-2 border-b bg-muted/30 px-3 py-2">
+        <section className="space-y-2">
+            <header className="flex items-center justify-between gap-2 px-1">
                 <div className="flex items-center gap-2">
                     {icon}
                     <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -1417,9 +1455,9 @@ function Section({ title, subtitle, count, icon, emptyText, children }) {
                 )}
             </header>
             {hasChildren ? (
-                <ul className="divide-y">{children}</ul>
+                <ul className="space-y-2">{children}</ul>
             ) : (
-                <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+                <div className="rounded-xl border border-dashed bg-card/60 px-4 py-6 text-center text-xs text-muted-foreground">
                     {emptyText}
                 </div>
             )}
@@ -1448,7 +1486,6 @@ function PersonalRow({
 }) {
     const due = dueLabel(todo.dueDate);
     const dueCls = dueClass(todo.dueDate, todo.done);
-    const meta = PRIORITY_META[todo.priority];
     return (
         <li
             draggable={canReorder}
@@ -1456,10 +1493,16 @@ function PersonalRow({
             onDragOver={onDragOver}
             onDrop={onDrop}
             className={cn(
-                'group flex items-start gap-2 px-3 py-2.5 transition-colors',
-                todo.done && 'bg-muted/30',
+                // Rounded card; overflow-hidden clips the priority spine to
+                // the corner radius (same treatment as the project cards).
+                'group flex items-stretch overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm transition-all hover:border-primary/40 hover:shadow-md dark:border-white/10',
+                todo.done && 'bg-muted/40',
             )}
         >
+            {/* Priority spine (colour + vertical label), like the project
+                cards' status band. */}
+            <PrioritySpine priority={todo.priority} done={todo.done} />
+            <div className="flex min-w-0 flex-1 items-start gap-2 px-3 py-2.5">
             {canReorder && (
                 <span
                     className="mt-1.5 inline-flex cursor-grab text-muted-foreground hover:text-foreground"
@@ -1481,75 +1524,77 @@ function PersonalRow({
             >
                 {todo.done && <Check className="h-3.5 w-3.5" />}
             </button>
-            <div className="min-w-0 flex-1">
-                {onOpen ? (
-                    <button
-                        type="button"
-                        onClick={onOpen}
-                        className={cn(
-                            'text-left text-sm font-medium hover:text-primary hover:underline',
-                            todo.done && 'text-muted-foreground line-through',
-                        )}
-                        title="View details and log time"
-                    >
-                        {todo.title}
-                    </button>
-                ) : (
-                    <p
-                        className={cn(
-                            'text-sm font-medium',
-                            todo.done && 'text-muted-foreground line-through',
-                        )}
-                    >
-                        {todo.title}
-                    </p>
-                )}
+            <div className="min-w-0 flex-1 space-y-1">
+                {/* Task: <name> */}
+                <div className="flex min-w-0 items-center gap-2">
+                    <FieldLabel>Task:</FieldLabel>
+                    {onOpen ? (
+                        <button
+                            type="button"
+                            onClick={onOpen}
+                            className={cn(
+                                'truncate text-left text-sm font-medium hover:text-primary hover:underline',
+                                todo.done && 'text-muted-foreground line-through',
+                            )}
+                            title="View details and log time"
+                        >
+                            {todo.title}
+                        </button>
+                    ) : (
+                        <p
+                            className={cn(
+                                'truncate text-sm font-medium',
+                                todo.done && 'text-muted-foreground line-through',
+                            )}
+                        >
+                            {todo.title}
+                        </p>
+                    )}
+                </div>
                 {todo.notes && (
                     <p className="line-clamp-2 text-xs text-muted-foreground">
                         {todo.notes}
                     </p>
                 )}
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
-                    {showAssignee && (
-                        <AssigneeBadge person={todo.owner} />
-                    )}
-                    {due && (
-                        <span
-                            className={cn(
-                                'inline-flex items-center gap-1',
-                                dueCls,
-                            )}
-                        >
-                            {dueCls.includes('destructive') ? (
-                                <AlertCircle className="h-3 w-3" />
-                            ) : (
-                                <CalendarDays className="h-3 w-3" />
-                            )}
-                            {due}
-                        </span>
-                    )}
-                    {meta && (
-                        <Badge
-                            variant="outline"
-                            className={cn(
-                                'gap-1 text-[10px]',
-                                meta.className,
-                            )}
-                        >
-                            <Flag className="h-2.5 w-2.5" />
-                            {meta.label}
-                        </Badge>
-                    )}
-                    {todo.project && (
+                {/* Project: <name> */}
+                {todo.project && (
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
+                        <FieldLabel>Project:</FieldLabel>
                         <Link
                             to={`/projects/${todo.project.id}`}
-                            className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                            className="inline-flex min-w-0 items-center gap-1 truncate text-foreground/90 hover:text-primary hover:underline"
                         >
-                            <FolderKanban className="h-3 w-3" />
-                            {todo.project.name}
+                            <FolderKanban className="h-3 w-3 shrink-0" />
+                            <span className="truncate">{todo.project.name}</span>
                         </Link>
-                    )}
-                </div>
+                    </div>
+                )}
+                {/* Due (+ assignee when shown) */}
+                {(due || showAssignee) && (
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+                        {showAssignee && (
+                            <AssigneeBadge person={todo.owner} />
+                        )}
+                        {due && (
+                            <span className="inline-flex items-center gap-1.5">
+                                <FieldLabel>Due:</FieldLabel>
+                                <span
+                                    className={cn(
+                                        'inline-flex items-center gap-1',
+                                        dueCls,
+                                    )}
+                                >
+                                    {dueCls.includes('destructive') ? (
+                                        <AlertCircle className="h-3 w-3" />
+                                    ) : (
+                                        <CalendarDays className="h-3 w-3" />
+                                    )}
+                                    {due}
+                                </span>
+                            </span>
+                        )}
+                    </div>
+                )}
             </div>
             <div className="flex items-center gap-0.5 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
                 {canLogTime && onLogTime && todo.projectId && (
@@ -1611,6 +1656,7 @@ function PersonalRow({
                     </>
                 )}
             </div>
+            </div>
         </li>
     );
 }
@@ -1631,17 +1677,22 @@ function TaskRow({
         : TASK_STATUSES;
     const due = dueLabel(task.dueDate);
     const dueCls = dueClass(task.dueDate, task.done);
-    const meta = PRIORITY_META[task.priority];
     const taskHref = task.project
         ? `/projects/${task.project.id}#task-${task.id}`
         : null;
     return (
         <li
             className={cn(
-                'group flex items-start gap-2 px-3 py-2.5 transition-colors',
-                task.done && 'bg-muted/30',
+                // Rounded card; overflow-hidden clips the priority spine to
+                // the corner radius (same treatment as the project cards).
+                'group flex items-stretch overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm transition-all hover:border-primary/40 hover:shadow-md dark:border-white/10',
+                task.done && 'bg-muted/40',
             )}
         >
+            {/* Priority spine (colour + vertical label), like the project
+                cards' status band. */}
+            <PrioritySpine priority={task.priority} done={task.done} />
+            <div className="flex min-w-0 flex-1 items-start gap-2 px-3 py-2.5">
             <button
                 type="button"
                 onClick={onToggle}
@@ -1657,8 +1708,10 @@ function TaskRow({
             </button>
 
             {/* Main body — clicking the title opens the quick-view sheet */}
-            <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1 space-y-1">
+                {/* Task: [code] <name> [Subtask] */}
+                <div className="flex min-w-0 items-center gap-2">
+                    <FieldLabel>Task:</FieldLabel>
                     {task.code && (
                         <span
                             className="shrink-0 rounded border border-border bg-muted/60 px-1 py-px font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
@@ -1696,72 +1749,81 @@ function TaskRow({
                         </Badge>
                     )}
                 </div>
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+                {/* Project: <code · name / phase> (· under "parent") */}
+                {(task.project || task.parent) && (
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                        <FieldLabel>Project:</FieldLabel>
+                        {task.project && (
+                            <span className="inline-flex min-w-0 items-center gap-1 text-foreground/90">
+                                <FolderKanban className="h-3 w-3 shrink-0" />
+                                <span className="truncate">
+                                    {task.project.code
+                                        ? `${task.project.code} · ${task.project.name}`
+                                        : task.project.name}
+                                    {task.phase ? ` / ${task.phase.name}` : ''}
+                                </span>
+                            </span>
+                        )}
+                        {task.parent && (
+                            <span className="inline-flex items-center gap-1 text-muted-foreground">
+                                <UserIcon className="h-3 w-3" />
+                                under &ldquo;{task.parent.title}&rdquo;
+                            </span>
+                        )}
+                    </div>
+                )}
+                {/* Due · Status (· assignee when shown) */}
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
                     {showAssignee && (
                         <AssigneeBadge person={task.assignee} />
                     )}
                     {due && (
-                        <span
-                            className={cn(
-                                'inline-flex items-center gap-1',
-                                dueCls,
-                            )}
-                        >
-                            {dueCls.includes('destructive') ? (
-                                <AlertCircle className="h-3 w-3" />
-                            ) : (
-                                <CalendarDays className="h-3 w-3" />
-                            )}
-                            {due}
+                        <span className="inline-flex items-center gap-1.5">
+                            <FieldLabel>Due:</FieldLabel>
+                            <span
+                                className={cn(
+                                    'inline-flex items-center gap-1',
+                                    dueCls,
+                                )}
+                            >
+                                {dueCls.includes('destructive') ? (
+                                    <AlertCircle className="h-3 w-3" />
+                                ) : (
+                                    <CalendarDays className="h-3 w-3" />
+                                )}
+                                {due}
+                            </span>
                         </span>
-                    )}
-                    {meta && (
-                        <Badge
-                            variant="outline"
-                            className={cn('gap-1 text-[10px]', meta.className)}
-                        >
-                            <Flag className="h-2.5 w-2.5" />
-                            {meta.label}
-                        </Badge>
                     )}
                     {onStatusChange && !task.done && (
-                        <Select
-                            value={task.status || 'TODO'}
-                            onValueChange={onStatusChange}
-                        >
-                            <SelectTrigger
-                                className="h-6 w-[7.5rem] border-dashed text-[10px]"
-                                onClick={(e) => e.stopPropagation()}
+                        <span className="inline-flex items-center gap-1.5">
+                            <FieldLabel>Status:</FieldLabel>
+                            <Select
+                                value={task.status || 'TODO'}
+                                onValueChange={onStatusChange}
                             >
-                                <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {taskStatusList.map((s) => (
-                                    <SelectItem key={s.value} value={s.value}>
-                                        {s.label}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
-                    )}
-                    {task.status && task.done && (
-                        <Badge variant="secondary" className="text-[10px]">
-                            {TASK_STATUS_MAP[task.status]?.label || task.status}
-                        </Badge>
-                    )}
-                    {task.project && (
-                        <span className="inline-flex items-center gap-1 text-muted-foreground">
-                            <FolderKanban className="h-3 w-3" />
-                            {task.project.code
-                                ? `${task.project.code} · ${task.project.name}`
-                                : task.project.name}
-                            {task.phase ? ` / ${task.phase.name}` : ''}
+                                <SelectTrigger
+                                    className="h-6 w-[7.5rem] border-dashed text-[10px]"
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {taskStatusList.map((s) => (
+                                        <SelectItem key={s.value} value={s.value}>
+                                            {s.label}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
                         </span>
                     )}
-                    {task.parent && (
-                        <span className="inline-flex items-center gap-1 text-muted-foreground">
-                            <UserIcon className="h-3 w-3" />
-                            under "{task.parent.title}"
+                    {task.status && task.done && (
+                        <span className="inline-flex items-center gap-1.5">
+                            <FieldLabel>Status:</FieldLabel>
+                            <Badge variant="secondary" className="text-[10px]">
+                                {TASK_STATUS_MAP[task.status]?.label || task.status}
+                            </Badge>
                         </span>
                     )}
                 </div>
@@ -1815,6 +1877,7 @@ function TaskRow({
                         <ExternalLink className="h-3.5 w-3.5" />
                     </a>
                 )}
+            </div>
             </div>
         </li>
     );
