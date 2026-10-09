@@ -38,6 +38,7 @@ export const TEMPLATE_GUIDE_TOPICS = [
     { id: 'templates-ticket-types', label: 'Ticket types' },
     { id: 'templates-requester-groups', label: 'Requester groups' },
     { id: 'templates-terminals', label: 'Terminals' },
+    { id: 'templates-wallboards', label: 'Wallboards' },
 ];
 
 export const templatesGuideBody = (
@@ -502,6 +503,47 @@ export const templatesGuideBody = (
                     Only the ticket <em>Terminal</em> field uses this list (OS →
                     Vendor → Model). A ticket shows "Vendor Model - OS". Deleting
                     a model clears it from tickets that used it.
+                </li>
+            </ul>
+        </HelpSubTopic>
+
+        <HelpSubTopic id="templates-wallboards" title="Wallboards">
+            <ul className={list}>
+                <li>
+                    A <strong>wallboard</strong> is a big-screen board of all open
+                    tickets for a TV in the support room. Name the screen and{' '}
+                    <em>Create link</em>; then <em>Copy link</em> (or{' '}
+                    <em>Open</em>) and open it in the TV's browser — no sign-in
+                    is needed.
+                </li>
+                <li>
+                    The link is the only key, so <strong>anyone who has it sees
+                    the board</strong>: code, title, ticket type, priority,
+                    status, age and who is handling each open ticket. Internal
+                    tickets, descriptions, clients and requesters are never
+                    shown. Give every screen its own link.
+                </li>
+                <li>
+                    <em>Pause link</em> turns a screen off right away (and{' '}
+                    <em>Resume link</em> back on); <em>New link</em> replaces the
+                    key — the old link stops working, so open the new one on the
+                    screen; <em>Delete</em> removes it. The row shows when a
+                    screen last loaded it.
+                </li>
+                <li>
+                    On the screen: columns New / In progress / Pending,
+                    counters (active, new today, unassigned, urgent, resolved
+                    today). Updates arrive instantly over the live connection
+                    (green <em>Live</em> badge); if that's blocked, the board
+                    checks every 10 seconds instead. A new ticket pops up for
+                    10 seconds with a chime and then glows in its column.
+                    Browsers only play sound after one click on the page: click{' '}
+                    <em>Turn on sound for new tickets</em> once after opening it
+                    (the speaker icon mutes). To skip that click on a dedicated
+                    TV, start Chrome with{' '}
+                    <code>--autoplay-policy=no-user-gesture-required</code>{' '}
+                    (or allow autoplay for the site in Firefox). Use the
+                    full-screen button for a clean view.
                 </li>
             </ul>
         </HelpSubTopic>

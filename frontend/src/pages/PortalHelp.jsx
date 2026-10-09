@@ -25,7 +25,7 @@ const STATUS_ROWS = [
         text: 'Received and waiting for someone on the support team to pick it up. You can still edit or delete it.',
     },
     {
-        label: 'Open / In progress',
+        label: 'In progress',
         tone: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-500/15 dark:text-indigo-200',
         text: 'Someone is working on it — the request shows who is handling it.',
     },

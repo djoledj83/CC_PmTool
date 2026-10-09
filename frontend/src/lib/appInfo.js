@@ -19,7 +19,7 @@
 // On each release bump APP_VERSION here and keep it in sync with the
 // `version` field in frontend/package.json and backend/package.json.
 export const APP_NAME = import.meta.env.VITE_APP_NAME || 'PM Tool';
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 export const COPYRIGHT_YEAR = new Date().getFullYear();
 export const COPYRIGHT_HOLDER =
     import.meta.env.VITE_COPYRIGHT_HOLDER || 'Your Company';

@@ -25,6 +25,7 @@ import {
     Tag,
     Terminal,
     Trash2,
+    Tv,
     Users,
 } from 'lucide-react';
 
@@ -36,6 +37,7 @@ import { invalidateCatalog } from '@/lib/catalogs';
 import { TicketTypesManager } from '@/pages/TicketRequestTypes';
 import { RequesterGroupsManager } from '@/components/RequesterGroupsManager';
 import { TerminalsManager } from '@/components/TerminalsManager';
+import { WallboardsManager } from '@/components/WallboardsManager';
 import { TopBar } from '@/components/TopBar';
 import AdminTabs from '@/components/AdminTabs';
 import { Badge } from '@/components/ui/badge';
@@ -224,7 +226,7 @@ const SECTION_GROUPS = [
     {
         title: 'Tickets',
         description:
-            'Help-desk request types shown as cards on the requester portal.',
+            'Help-desk setup: the request types on the portal, requester groups, terminals and big-screen wallboards.',
         items: [
             {
                 id: 'ticket-types',
@@ -250,6 +252,14 @@ const SECTION_GROUPS = [
                 description:
                     'Vendors and their terminal models (with OS type), used when raising tickets.',
             },
+            {
+                id: 'wallboards',
+                label: 'Wallboards',
+                icon: Tv,
+                accent: 'from-slate-500 to-sky-500',
+                description:
+                    'Big-screen ticket boards for a TV in the support room — each screen opens its own secret link without signing in.',
+            },
         ],
     },
 ];
@@ -261,6 +271,7 @@ const EXTERNAL_SECTIONS = new Set([
     'ticket-types',
     'requester-groups',
     'terminals',
+    'wallboards',
 ]);
 
 // Where the rail's per-section count comes from: the existing list
@@ -290,6 +301,7 @@ const COUNT_SOURCES = {
     'ticket-types': ['/ticket-request-types', 'requestTypes'],
     'requester-groups': ['/requester-groups', 'groups'],
     terminals: ['/terminals/vendors', 'vendors'],
+    wallboards: ['/wallboard/boards', 'boards'],
 };
 
 async function fetchSectionCount(id) {
@@ -2254,6 +2266,12 @@ function renderSection(id, common) {
             return (
                 <ExternalSection key={id} {...common}>
                     <TerminalsManager />
+                </ExternalSection>
+            );
+        case 'wallboards':
+            return (
+                <ExternalSection key={id} {...common}>
+                    <WallboardsManager />
                 </ExternalSection>
             );
         default:

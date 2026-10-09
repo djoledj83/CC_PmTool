@@ -7,6 +7,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import Portal from '@/pages/Portal';
 import PortalRequest from '@/pages/PortalRequest';
 import PortalHelp from '@/pages/PortalHelp';
+import Wallboard from '@/pages/Wallboard';
 import Login from '@/pages/Login';
 import Register from '@/pages/Register';
 import ForgotPassword from '@/pages/ForgotPassword';
@@ -80,6 +81,9 @@ export default function App() {
             <Route path="/register" element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/reset-password" element={<ResetPassword />} />
+            {/* Big-screen ticket board — no sign-in, the secret key in the
+                link is the credential (Templates → Tickets → Wallboards). */}
+            <Route path="/wallboard/:key" element={<Wallboard />} />
             {/* Role-agnostic ticket deep-link — redirects to the portal
                 or the workspace ticket depending on who's signed in. */}
             <Route

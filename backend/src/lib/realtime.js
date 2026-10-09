@@ -84,6 +84,11 @@ function projectRoom(projectId) {
 // rooms that may know about them — customers never hear about other
 // organisations' tickets or who in the team is online.
 const STAFF_ROOM = 'audience:staff';
+// Big-screen wallboards (no user — they authenticate with the board's
+// secret key). They only ever get "something changed" pings for
+// non-internal tickets and refetch the board over HTTP.
+const WALLBOARD_ROOM = 'audience:wallboard';
+const wallboardRoom = (id) => `wallboard:${id}`;
 const INTERNAL_REQUESTERS_ROOM = 'audience:requesters';
 const orgRoom = (clientId) => `audience:org:${clientId}`;
 
@@ -138,6 +143,7 @@ function emitToTicketAudience({ internal, clientId, userIds } = {}, event, paylo
     if (!internal) {
         rooms.push(INTERNAL_REQUESTERS_ROOM);
         if (clientId) rooms.push(orgRoom(clientId));
+        if (event === 'ticket:activity') rooms.push(WALLBOARD_ROOM);
     }
     for (const id of new Set((userIds || []).filter(Boolean))) {
         rooms.push(userRoom(id));
@@ -152,6 +158,17 @@ function disconnectUser(userId) {
     if (!io || !userId) return;
     try {
         io.in(userRoom(userId)).disconnectSockets(true);
+    } catch {
+        /* best-effort */
+    }
+}
+
+// A wallboard link was paused, regenerated or deleted — drop its screens
+// (they reconnect with the old key, get refused and show "link not valid").
+function disconnectWallboard(id) {
+    if (!io || !id) return;
+    try {
+        io.in(wallboardRoom(id)).disconnectSockets(true);
     } catch {
         /* best-effort */
     }
@@ -174,6 +191,15 @@ function init(httpServer, { corsOrigin } = {}) {
 
     io.use(async (socket, next) => {
         try {
+            // A wallboard screen: its secret key instead of a user token.
+            const wallboardKey = socket.handshake.auth?.wallboard;
+            if (wallboardKey) {
+                const { findActiveWallboard } = require('./wallboard');
+                const board = await findActiveWallboard(String(wallboardKey));
+                if (!board) return next(new Error('Invalid wallboard'));
+                socket.data.wallboard = { id: board.id };
+                return next();
+            }
             const token =
                 socket.handshake.auth?.token ||
                 (socket.handshake.headers?.authorization || '').replace(
@@ -216,6 +242,12 @@ function init(httpServer, { corsOrigin } = {}) {
     });
 
     io.on('connection', (socket) => {
+        // Wallboards listen only; nothing else (presence, chat, projects).
+        if (socket.data.wallboard) {
+            socket.join(WALLBOARD_ROOM);
+            socket.join(wallboardRoom(socket.data.wallboard.id));
+            return;
+        }
         const { id: userId } = socket.data.user;
         const isStaff = socket.data.user.role !== 'REQUESTER';
 
@@ -331,6 +363,7 @@ module.exports = {
     emitToTicketAudience,
     audienceRoomsFor,
     disconnectUser,
+    disconnectWallboard,
     userRoom,
     conversationRoom,
     projectRoom,

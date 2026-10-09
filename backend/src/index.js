@@ -74,6 +74,7 @@ const terminalRoutes = require('./routes/terminals');
 const ticketFieldRoutes = require('./routes/ticketFields');
 const announcementRoutes = require('./routes/announcements');
 const adminLogRoutes = require('./routes/adminLogs');
+const wallboardRoutes = require('./routes/wallboard');
 const { notFound, errorHandler } = require('./middleware/error');
 const { requestLogger, errorLogger, logger } = require('./lib/logger');
 const errorReporter = require('./lib/errorReporter');
@@ -419,6 +420,9 @@ app.use('/api/terminals', terminalRoutes);
 app.use('/api/ticket-fields', ticketFieldRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/admin', adminLogRoutes);
+// Wallboards: the /view/:key read is public (secret link); managing the
+// links needs a session (see routes/wallboard.js).
+app.use('/api/wallboard', wallboardRoutes);
 
 app.use(notFound);
 // Report 5xx errors to the reporter BEFORE the JSON-shape error

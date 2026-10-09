@@ -9,7 +9,7 @@
   `COPYRIGHT_HOLDER` in the root `.env` (see `TEMPLATE_SETUP.md`). The
   backend reads `APP_NAME` directly; the frontend gets `VITE_APP_NAME` /
   `VITE_COPYRIGHT_HOLDER` baked in at build time via `docker-compose.yml`.
-- **Version:** v1.1.0 (semantic versioning)
+- **Version:** v1.2.0 (semantic versioning)
 - **Single source of truth for the version shown in the UI:**
   `frontend/src/lib/appInfo.js` (surfaced in the sidebar footer and
   Help → About & version).

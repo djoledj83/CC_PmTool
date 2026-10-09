@@ -222,3 +222,26 @@ export function playMessageSound(soundId) {
     const preset = PRESET_BY_ID.get(id) || PRESET_BY_ID.get(DEFAULT_SOUND_ID);
     playPreset(preset);
 }
+
+// Big-screen wallboard: a louder three-note chime for a new ticket. The
+// board has its own mute, so the chat mute doesn't apply.
+const WALLBOARD_CHIME = {
+    id: 'wallboard',
+    label: 'Wallboard chime',
+    master: 0.22,
+    notes: [
+        { freq: 659.25, t: 0, type: 'triangle', attack: 0.01, decay: 0.5, peak: 0.6 },
+        { freq: 830.61, t: 0.16, type: 'triangle', attack: 0.01, decay: 0.5, peak: 0.6 },
+        { freq: 987.77, t: 0.32, type: 'triangle', attack: 0.01, decay: 0.9, peak: 0.7 },
+    ],
+};
+
+export function playWallboardChime() {
+    playPreset(WALLBOARD_CHIME, { ignoreMute: true });
+}
+
+// True once the browser lets this page play sound (after a click / key).
+export function audioReady() {
+    const ctx = getAudioContext();
+    return Boolean(ctx && ctx.state === 'running');
+}

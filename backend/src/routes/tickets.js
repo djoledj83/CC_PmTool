@@ -74,9 +74,10 @@ router.use(requireAuth);
 // Image attachments live ~2 months before the sweeper removes them.
 const TICKET_IMAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
 
+// "Open" is retired — tickets go New → In progress (see the
+// 20261009010000_retire_open_status migration). The API no longer accepts it.
 const TicketStatus = z.enum([
     'NEW',
-    'OPEN',
     'IN_PROGRESS',
     'PENDING',
     'RESOLVED',
@@ -353,7 +354,7 @@ router.get('/', async (req, res, next) => {
             reporterId,
         } = req.query;
         // status / type accept a single value or a comma-separated list
-        // (the checkbox filters send "NEW,OPEN" etc).
+        // (the checkbox filters send "NEW,PENDING" etc).
         const asList = (v) =>
             String(v)
                 .split(',')
@@ -1504,7 +1505,7 @@ router.patch('/:id', async (req, res, next) => {
 
 // POST /api/tickets/:id/take -------------------------------------------
 // An agent claims an unassigned ticket: assigns it to themselves and
-// moves NEW -> OPEN. They become the owner.
+// moves NEW -> IN_PROGRESS. They become the owner.
 router.post('/:id/take', async (req, res, next) => {
     try {
         if (!canManage(req)) throw httpError(403, 'Only agents can take tickets.');

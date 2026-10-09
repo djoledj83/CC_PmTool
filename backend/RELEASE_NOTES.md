@@ -5,7 +5,7 @@
 > `MANIFEST.md`. Sections are ordered oldest-first; the in-app "What's new"
 > popover shows them newest-last and only recognises `## N. Title` headings.
 
-Version: **v1.1.0** (semantic versioning) · Last updated: **2026-10-07**
+Version: **v1.2.0** (semantic versioning) · Last updated: **2026-10-09**
 
 ---
 
@@ -87,3 +87,16 @@ Modules added later (sprints & planning boards, ticketing / help-desk, products,
 - Files: `backend/src/routes/ticketHelp.js`, `adminLogs.js`,
   `backend/src/lib/{authAudit,logger,ticketAutoClose,ticketHelp,ticketStatusNotify,countryCodes}.js`,
   `frontend/src/pages/{AdminLogs,PortalHelp}.jsx`, `frontend/src/components/Ticket*.jsx`.
+
+---
+
+## 5. v1.2.0 — ticket wallboards & notification sound
+
+- Wallboards: read-only ticket dashboards for a screen on the wall, opened
+  through a secret link (`/api/wallboard/view/:key`, no login); links are
+  created and revoked under Templates → Tickets → Wallboards.
+- Notification sound for new in-app notifications; Help page additions.
+- No database migration required.
+- Files: `backend/src/routes/wallboard.js`, `backend/src/lib/wallboard.js`,
+  `frontend/src/pages/Wallboard.jsx`, `frontend/src/components/WallboardsManager.jsx`,
+  `frontend/src/lib/notificationSound.js`.

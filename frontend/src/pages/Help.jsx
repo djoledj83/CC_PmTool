@@ -1637,6 +1637,21 @@ const SECTIONS = [
                 </p>
 
                 <p>
+                    <strong>Big screen (wallboard).</strong> For a TV in the
+                    support room, create a wallboard link under Templates →
+                    Tickets → Wallboards and open it on the screen — no
+                    sign-in. It shows every open ticket (not internal ones) by
+                    status with live counters; a new ticket pops up with a
+                    chime and then glows in its column. Anyone with the link
+                    sees the board, so give each screen its own link and pause
+                    or renew it when needed — see{' '}
+                    <a href="#templates-wallboards" className="text-primary hover:underline">
+                        Templates → Wallboards
+                    </a>
+                    .
+                </p>
+
+                <p>
                     <strong>Admin setup</strong> lives under Templates →
                     Tickets: <em>Ticket types</em> (the portal cards, with
                     icon, default priority, agent visibility and custom
